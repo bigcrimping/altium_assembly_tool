@@ -1,0 +1,2 @@
+PySide6>=6.5
+altium-monkey @ git+https://github.com/wavenumber-eng/altium_monkey.git
