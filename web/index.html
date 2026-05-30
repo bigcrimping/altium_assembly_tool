@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Altium Assembly Tool</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div id="toolbar">
+  <div class="tb-group">
+    <button class="btn" id="btn-open">Open PCB</button>
+    <span class="board-name" id="board-name">No file loaded</span>
+  </div>
+  <div class="tb-group">
+    <button class="btn" id="btn-prev" disabled>&#9668; Prev</button>
+    <button class="btn" id="btn-next" disabled>Next &#9658;</button>
+    <span class="step-label" id="step-label"></span>
+  </div>
+  <div class="tb-group">
+    <button class="btn" id="btn-fit" disabled>Fit View</button>
+    <button class="btn" id="btn-clear" disabled>Clear Selection</button>
+  </div>
+  <div class="tb-group">
+    <button class="btn active-side" id="btn-top" disabled>Top Side</button>
+    <button class="btn" id="btn-bot" disabled>Bottom Side</button>
+  </div>
+</div>
+
+<!-- Load dialog overlay -->
+<div id="load-overlay" class="hidden">
+  <div class="load-form">
+    <h2>Open PCB File</h2>
+    <label>PCB File Path (.PcbDoc)</label>
+    <input type="text" id="pcb-path" placeholder="/path/to/board.PcbDoc" autocomplete="off">
+    <label>Project File Path (.PrjPcb) &mdash; optional, for DNP data</label>
+    <input type="text" id="prj-path" placeholder="/path/to/project.PrjPcb (optional)" autocomplete="off">
+    <div id="load-error" class="hidden"></div>
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btn-load-file">Load</button>
+      <button class="btn" id="btn-cancel-load">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div id="main-split">
+  <div id="board-panel">
+    <div id="board-container">
+      <div id="board-transform"></div>
+    </div>
+  </div>
+  <div id="resizer"></div>
+  <div id="bom-panel">
+    <div class="bom-header">Bill of Materials</div>
+    <div id="bom-scroll">
+      <table id="bom-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>QTY</th>
+            <th>Placed</th>
+            <th>To Place</th>
+            <th>Name</th>
+            <th>Top Refs</th>
+            <th>Bottom Refs</th>
+          </tr>
+        </thead>
+        <tbody id="bom-body"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div id="statusbar">Ready.</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
