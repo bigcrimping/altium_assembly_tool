@@ -8,13 +8,17 @@ A 2D PCB assembly viewer for Altium `.PcbDoc` files built with PySide6. Step thr
 
 Click **Open File** and select a `.PcbDoc` file. A progress dialog tracks the load. Once done, the board renders in the top pane and the BOM table populates below.
 
+
+
+
 <p align="center">
-  <img width="2560" height="1399" alt="image" src="https://github.com/user-attachments/assets/e3c8639e-4e52-4cc0-8ab2-2401792aa6fd" />
+  <img width="1123" height="817" alt="image" src="https://github.com/user-attachments/assets/3db23893-6aae-45d7-9ed6-06fcc304c5e6" />
 </p>
 
 
+
 <p align="center">
-  <img width="2560" height="1399" alt="image" src="https://github.com/user-attachments/assets/dd39a229-d6d0-4c19-846a-71ab3a94148e" />
+  <img width="1123" height="817" alt="image" src="https://github.com/user-attachments/assets/71c34ead-8996-4961-9d05-f140a5a4d59d" />
 </p>
 
 
@@ -27,7 +31,7 @@ Click **Load .PrjPcb** and select the `.PrjPcb` file for the same project. This 
 - DNP parts count as already placed for the purpose of row completion — so a row with one real part and one DNP part turns green once the real part is double-clicked.
 
 <p align="center">
-  <img width="2560" height="1399" alt="image" src="https://github.com/user-attachments/assets/482fc4ce-c1aa-4058-9739-59d6998dfd38" />
+  <img width="1123" height="817" alt="image" src="https://github.com/user-attachments/assets/80506f31-d1cf-45f8-942f-d8ec7a1be7a9" />
 </p>
 
 ### 3. Step through the BOM
@@ -45,7 +49,7 @@ With a BOM row selected, **double-click a component pad** in the board view to m
 
 
 <p align="center">
-  <img width="2560" height="1399" alt="image" src="https://github.com/user-attachments/assets/01e10e87-70e6-45b5-910b-421bdff57532" />
+  <img width="1123" height="817" alt="image" src="https://github.com/user-attachments/assets/d91ca8db-aebe-45e8-a8c5-3d9b888c068b" />
 </p>
 
 - A **green border box** appears around the component.
@@ -121,6 +125,58 @@ The state file is plain JSON containing only the list of placed designators.
 | Green row in BOM | All refs (both sides) are done |
 | Orange/white striped pad | Pin 1 marker |
 
+
+---
+
+## Browser mode
+
+The tool includes a browser-based UI as an alternative to the desktop window. It runs a local Flask web server and opens your default browser automatically — useful when you want to access the interface remotely or avoid the PySide6 dependency.
+
+<p align="center">
+  <img width="1672" height="1237" alt="image" src="https://github.com/user-attachments/assets/83ca7da3-bf46-4e48-b964-b4218a8f8258" />
+</p>
+
+
+### Starting the browser UI
+
+```
+python main.py --browser
+```
+
+Or to load a PCB file immediately on launch:
+
+```
+python main.py --browser "C:\path\to\board.PcbDoc"
+```
+
+By default the server listens on port **4321**. Use `--port` to change it:
+
+```
+python main.py --browser --port 8080
+```
+
+The server URL is printed to the terminal and the browser opens automatically:
+
+```
+Serving at http://127.0.0.1:4321  (Ctrl-C to quit)
+```
+
+### Loading a file
+
+Because the browser has no access to your local filesystem, files are loaded by typing their full path into a dialog that appears on startup. An optional `.PrjPcb` path can be entered in the same dialog to load DNP data.
+
+Click **Open PCB** in the toolbar at any time to reload or switch files.
+
+### Differences from the desktop app
+
+| Feature | Desktop | Browser |
+|---|---|---|
+| File picker | Native OS dialog | Type the full file path |
+| DNP data | **Load .PrjPcb** button | Entered in the load dialog alongside the PCB path |
+| Save / load state | **Save State** / **Open State** buttons | Auto-saved on every toggle to `<board>.popstate.json` in the same folder |
+| Keyboard shortcuts | ↑ / ↓ | ↑ ↓ ← → (all four arrows step through BOM), **0** fits the view |
+
+Everything else — BOM table, component highlighting, double-click to mark placed, DNP overlays, top/bottom side switching — works identically.
 
 ---
 

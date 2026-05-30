@@ -678,15 +678,49 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, title, message)
 
 
+def _run_browser_mode(pcb_path: Path | None, port: int) -> None:
+    import threading
+    import webbrowser
+    from web_server import WebServer
+
+    server = WebServer(port=port)
+    url = f"http://127.0.0.1:{port}"
+
+    if pcb_path is not None:
+        print(f"Loading {pcb_path.name}…")
+        try:
+            server.load(pcb_path)
+        except Exception as exc:
+            print(f"Load error: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    print(f"Serving at {url}  (Ctrl-C to quit)")
+    threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+    server.run()
+
+
 def main() -> None:
-    app = QApplication(sys.argv)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Altium Assembly Tool")
+    parser.add_argument("file", nargs="?", help="PCB file to open (.PcbDoc)")
+    parser.add_argument("--browser", action="store_true", help="Launch browser-based UI")
+    parser.add_argument("--port", type=int, default=4321, help="Port for browser UI (default: 4321)")
+    args = parser.parse_args()
+
+    pcb_path = Path(args.file) if args.file else None
+
+    if args.browser:
+        _run_browser_mode(pcb_path, args.port)
+        return
+
+    app = QApplication(sys.argv[:1])  # don't pass argparse args to Qt
     app.setApplicationName("Altium Assembly Steps")
     window = MainWindow()
     window.show()
-    # Auto-load file if passed as CLI argument
-    if len(sys.argv) > 1:
+    if pcb_path is not None:
         from PySide6.QtCore import QTimer
-        QTimer.singleShot(100, lambda: window._load_file(Path(sys.argv[1])))
+        QTimer.singleShot(100, lambda: window._load_file(pcb_path))
     sys.exit(app.exec())
 
 
