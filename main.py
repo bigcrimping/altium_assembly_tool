@@ -7,12 +7,13 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, QSize, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QAbstractTextDocumentLayout, QAction, QBrush, QColor, QTextDocument
+from PySide6.QtGui import QAbstractTextDocumentLayout, QAction, QBrush, QColor, QIcon, QTextDocument
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QButtonGroup,
     QFileDialog,
+    QHBoxLayout,
     QHeaderView,
     QLabel,
     QMainWindow,
@@ -33,6 +34,8 @@ from PySide6.QtWidgets import (
 from pcb_model import BomEntry, PcbModel, parse_prjpcb_dnp
 from pcb_viewer import PcbViewer
 from population_state import PopulationState
+
+ICON_PATH = Path(__file__).parent / "icon.svg"
 
 
 class PcbLoadWorker(QThread):
@@ -159,6 +162,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Altium Assembly Tool")
+        self.setWindowIcon(QIcon(str(ICON_PATH)))
         self.resize(1400, 900)
 
         self._model: PcbModel | None = None
@@ -262,7 +266,18 @@ class MainWindow(QMainWindow):
         bottom_widget = QWidget()
         bottom_layout = QVBoxLayout(bottom_widget)
         bottom_layout.setContentsMargins(4, 4, 4, 4)
-        bottom_layout.addWidget(QLabel("Bill of Materials"))
+
+        bom_header = QHBoxLayout()
+        bom_header.setContentsMargins(0, 0, 0, 0)
+        bom_header.addWidget(QLabel("Bill of Materials"))
+        self._btn_hide_fitted = QPushButton("Hide Fitted")
+        self._btn_hide_fitted.setCheckable(True)
+        self._btn_hide_fitted.setToolTip(
+            "Hide BOM rows where every part is already placed (or marked DNP)"
+        )
+        bom_header.addWidget(self._btn_hide_fitted)
+        bom_header.addStretch(1)
+        bottom_layout.addLayout(bom_header)
 
         self._bom_table = QTableWidget(0, 7)
         self._bom_table.setHorizontalHeaderLabels(
@@ -304,6 +319,7 @@ class MainWindow(QMainWindow):
         self._viewer.double_clicked_item.connect(self._on_viewer_double_click)
         self._btn_top_view.clicked.connect(self._on_view_top)
         self._btn_bottom_view.clicked.connect(self._on_view_bottom)
+        self._btn_hide_fitted.toggled.connect(self._apply_completed_filter)
         self._bom_table.currentCellChanged.connect(
             lambda row, *_: self._on_bom_row_changed(row)
         )
@@ -604,6 +620,7 @@ class MainWindow(QMainWindow):
         self._bom_table.blockSignals(False)
         self._apply_default_column_widths()
         self._bom_table.resizeRowsToContents()
+        self._apply_completed_filter()
 
     def _update_bom_colors(self) -> None:
         """Refresh ref HTML and row/cell colours without rebuilding the whole table."""
@@ -631,6 +648,18 @@ class MainWindow(QMainWindow):
         self._bom_table.blockSignals(False)
         self._bom_table.resizeRowsToContents()
         self._bom_table.viewport().update()
+        self._apply_completed_filter()
+
+    def _row_is_complete(self, visible: list[str]) -> bool:
+        """True when every visible designator in the row is placed or DNP."""
+        effective = self._placement.placed | self._dnp
+        return bool(visible) and all(d in effective for d in visible)
+
+    def _apply_completed_filter(self) -> None:
+        """Hide fully-fitted BOM rows when the 'Hide Fitted' toggle is on."""
+        hide = self._btn_hide_fitted.isChecked()
+        for row, (_entry, visible) in enumerate(self._active_bom):
+            self._bom_table.setRowHidden(row, hide and self._row_is_complete(visible))
 
     # ------------------------------------------------------------------
     # Keyboard navigation
@@ -716,6 +745,7 @@ def main() -> None:
 
     app = QApplication(sys.argv[:1])  # don't pass argparse args to Qt
     app.setApplicationName("Altium Assembly Steps")
+    app.setWindowIcon(QIcon(str(ICON_PATH)))
     window = MainWindow()
     window.show()
     if pcb_path is not None:

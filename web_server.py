@@ -102,6 +102,10 @@ class WebServer:
         def index():
             return send_from_directory(str(web_dir), "index.html")
 
+        @app.route("/favicon.svg")
+        def favicon():
+            return send_from_directory(str(Path(__file__).parent), "icon.svg")
+
         @app.route("/api/data")
         def api_data():
             with self._lock:

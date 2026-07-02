@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="icon.svg" width="96" height="96" alt="Altium Assembly Tool icon">
+</p>
+
 # Altium Assembly Tool
 
 A 2D PCB assembly viewer for Altium `.PcbDoc` files built with PySide6. Step through the BOM, track which components have been placed, mark No-Fit parts, and save progress between sessions.

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- White circle background with a soft ring so it reads on light and dark surfaces -->
+  <circle cx="128" cy="128" r="118" fill="#ffffff" stroke="#b0bec5" stroke-width="4"/>
+  <!-- Tweezers: two tapered blades joined at the top, splaying to fine points -->
+  <path d="M 112 54
+           L 98 196
+           L 124 104
+           Q 128 98 132 104
+           L 158 196
+           L 144 54
+           Q 128 46 112 54
+           Z"
+        fill="#263238" stroke="#263238" stroke-width="3"
+        stroke-linejoin="round" stroke-linecap="round"/>
+</svg>
