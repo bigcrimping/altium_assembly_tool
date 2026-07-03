@@ -114,6 +114,12 @@ def _refs_html(refs: list[str], placed: frozenset[str], dnp: frozenset[str] = fr
 class _HtmlDelegate(QStyledItemDelegate):
     """Renders HTML markup stored in the DisplayRole of table cells."""
 
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        # Reused across paint/sizeHint calls — constructing a QTextDocument per
+        # cell is a hotspot when resizing rows on large BOMs.
+        self._doc = QTextDocument()
+
     def paint(self, painter, option, index) -> None:
         opt = type(option)(option)
         self.initStyleOption(opt, index)
@@ -122,7 +128,7 @@ class _HtmlDelegate(QStyledItemDelegate):
         opt.text = ""
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
         # Draw HTML text on top
-        doc = QTextDocument()
+        doc = self._doc
         doc.setDefaultFont(opt.font)
         doc.setHtml(index.data(Qt.ItemDataRole.DisplayRole) or "")
         doc.setTextWidth(opt.rect.width())
@@ -136,7 +142,7 @@ class _HtmlDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index) -> QSize:
         opt = type(option)(option)
         self.initStyleOption(opt, index)
-        doc = QTextDocument()
+        doc = self._doc
         doc.setDefaultFont(opt.font)
         doc.setHtml(index.data(Qt.ItemDataRole.DisplayRole) or "")
         doc.setTextWidth(max(opt.rect.width(), 1))
@@ -378,7 +384,17 @@ class MainWindow(QMainWindow):
         self._worker.progress.connect(self._on_load_progress)
         self._worker.finished_ok.connect(self._on_load_ok)
         self._worker.finished_err.connect(self._on_load_err)
+        # Release the worker only once the thread has actually finished —
+        # dropping the last reference from the result handlers can destroy a
+        # QThread that is still returning from run().
+        self._worker.finished.connect(self._on_worker_finished)
         self._worker.start()
+
+    def _on_worker_finished(self) -> None:
+        worker = self._worker
+        if worker is not None:
+            self._worker = None
+            worker.deleteLater()
 
     def _on_load_progress(self, pct: int, msg: str) -> None:
         dlg = self._progress_dlg
@@ -387,9 +403,9 @@ class MainWindow(QMainWindow):
             dlg.setLabelText(msg)
 
     def _on_load_ok(self, model: PcbModel) -> None:
-        self._progress_dlg.close()
-        self._progress_dlg = None
-        self._worker = None
+        if self._progress_dlg is not None:
+            self._progress_dlg.close()
+            self._progress_dlg = None
         self._btn_open.setEnabled(True)
 
         self._model = model
@@ -414,9 +430,9 @@ class MainWindow(QMainWindow):
         )
 
     def _on_load_err(self, title: str, message: str) -> None:
-        self._progress_dlg.close()
-        self._progress_dlg = None
-        self._worker = None
+        if self._progress_dlg is not None:
+            self._progress_dlg.close()
+            self._progress_dlg = None
         self._btn_open.setEnabled(True)
         self.statusBar().showMessage("Load failed.")
         self._show_error(title, message)
@@ -479,7 +495,7 @@ class MainWindow(QMainWindow):
             return
         self._placement.toggle(desig)
         self._update_viewer()
-        self._update_bom_colors()
+        self._update_bom_row_for(desig)
 
     def _on_save_state(self) -> None:
         default = ""
@@ -597,13 +613,11 @@ class MainWindow(QMainWindow):
     def _populate_bom_table(self, active: list[tuple[BomEntry, list[str]]]) -> None:
         placed = self._placement.placed
         dnp = self._dnp
+        effective = placed | dnp
         self._bom_table.blockSignals(True)
         self._bom_table.clearContents()
         self._bom_table.setRowCount(len(active))
         for row, (entry, visible) in enumerate(active):
-            top_refs = [d for d in visible if "BOTTOM" not in entry.designator_layers.get(d, "TOP").upper()]
-            bot_refs = [d for d in visible if "BOTTOM" in entry.designator_layers.get(d, "TOP").upper()]
-            effective = placed | dnp
             placed_count = sum(1 for d in visible if d in effective)
             def _centered(text: str) -> QTableWidgetItem:
                 item = QTableWidgetItem(text)
@@ -614,41 +628,56 @@ class MainWindow(QMainWindow):
             self._bom_table.setItem(row, 2, _centered(str(placed_count)))
             self._bom_table.setItem(row, 3, _centered(str(len(visible) - placed_count)))
             self._bom_table.setItem(row, 4, QTableWidgetItem(entry.comment))
-            self._bom_table.setItem(row, 5, QTableWidgetItem(_refs_html(top_refs, placed, dnp)))
-            self._bom_table.setItem(row, 6, QTableWidgetItem(_refs_html(bot_refs, placed, dnp)))
-            _apply_row_colors(self._bom_table, row, top_refs, bot_refs, visible, placed, dnp)
+            self._bom_table.setItem(row, 5, QTableWidgetItem(_refs_html(entry.top_refs, placed, dnp)))
+            self._bom_table.setItem(row, 6, QTableWidgetItem(_refs_html(entry.bot_refs, placed, dnp)))
+            _apply_row_colors(self._bom_table, row, entry.top_refs, entry.bot_refs, visible, placed, dnp)
         self._bom_table.blockSignals(False)
         self._apply_default_column_widths()
         self._bom_table.resizeRowsToContents()
         self._apply_completed_filter()
 
-    def _update_bom_colors(self) -> None:
-        """Refresh ref HTML and row/cell colours without rebuilding the whole table."""
+    def _refresh_bom_row(self, row: int) -> None:
+        """Refresh counts, ref HTML, and colours of one BOM row in place."""
+        entry, visible = self._active_bom[row]
         placed = self._placement.placed
         dnp = self._dnp
         effective = placed | dnp
+        placed_count = sum(1 for d in visible if d in effective)
+        placed_item = self._bom_table.item(row, 2)
+        to_place_item = self._bom_table.item(row, 3)
+        if placed_item:
+            placed_item.setText(str(placed_count))
+        if to_place_item:
+            to_place_item.setText(str(len(visible) - placed_count))
+        top_item = self._bom_table.item(row, 5)
+        bot_item = self._bom_table.item(row, 6)
+        if top_item:
+            top_item.setText(_refs_html(entry.top_refs, placed, dnp))
+        if bot_item:
+            bot_item.setText(_refs_html(entry.bot_refs, placed, dnp))
+        _apply_row_colors(self._bom_table, row, entry.top_refs, entry.bot_refs, visible, placed, dnp)
+
+    def _update_bom_colors(self) -> None:
+        """Refresh ref HTML and row/cell colours without rebuilding the whole table."""
         self._bom_table.blockSignals(True)
-        for row, (entry, visible) in enumerate(self._active_bom):
-            top_refs = [d for d in visible if "BOTTOM" not in entry.designator_layers.get(d, "TOP").upper()]
-            bot_refs = [d for d in visible if "BOTTOM" in entry.designator_layers.get(d, "TOP").upper()]
-            placed_count = sum(1 for d in visible if d in effective)
-            placed_item = self._bom_table.item(row, 2)
-            to_place_item = self._bom_table.item(row, 3)
-            if placed_item:
-                placed_item.setText(str(placed_count))
-            if to_place_item:
-                to_place_item.setText(str(len(visible) - placed_count))
-            top_item = self._bom_table.item(row, 5)
-            bot_item = self._bom_table.item(row, 6)
-            if top_item:
-                top_item.setText(_refs_html(top_refs, placed, dnp))
-            if bot_item:
-                bot_item.setText(_refs_html(bot_refs, placed, dnp))
-            _apply_row_colors(self._bom_table, row, top_refs, bot_refs, visible, placed, dnp)
+        for row in range(len(self._active_bom)):
+            self._refresh_bom_row(row)
         self._bom_table.blockSignals(False)
         self._bom_table.resizeRowsToContents()
         self._bom_table.viewport().update()
         self._apply_completed_filter()
+
+    def _update_bom_row_for(self, desig: str) -> None:
+        """Refresh only the BOM row containing the given designator (toggle hot path)."""
+        for row, (_entry, visible) in enumerate(self._active_bom):
+            if desig in visible:
+                self._bom_table.blockSignals(True)
+                self._refresh_bom_row(row)
+                self._bom_table.blockSignals(False)
+                self._bom_table.resizeRowToContents(row)
+                if self._btn_hide_fitted.isChecked():
+                    self._bom_table.setRowHidden(row, self._row_is_complete(visible))
+                return
 
     def _row_is_complete(self, visible: list[str]) -> bool:
         """True when every visible designator in the row is placed or DNP."""
@@ -682,8 +711,8 @@ class MainWindow(QMainWindow):
         if row < 0 or row >= len(self._active_bom):
             return
         entry, visible = self._active_bom[row]
-        top_refs = [d for d in visible if "BOTTOM" not in entry.designator_layers.get(d, "TOP").upper()]
-        bot_refs = [d for d in visible if "BOTTOM" in entry.designator_layers.get(d, "TOP").upper()]
+        top_refs = entry.top_refs
+        bot_refs = entry.bot_refs
         menu = QMenu(self)
         a_all = QAction(f"Copy All Refs ({len(visible)})", self)
         a_all.triggered.connect(lambda: QApplication.clipboard().setText(", ".join(visible)))

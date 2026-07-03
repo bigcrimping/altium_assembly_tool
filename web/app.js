@@ -8,8 +8,12 @@ const state = {
   bounds: {},        // { "R1": [x0,y0,x1,y1], ... }
   placed: new Set(),
   dnp: new Set(),
+  hidden: { TOP: new Set(), BOTTOM: new Set() },  // hidden designators per view side
   loaded: false,
 };
+
+// designator → [svg elements] — rebuilt each time the base SVG is injected
+const compElems = new Map();
 
 // ── View / pan-zoom state ─────────────────────────────────────────────────────
 const view = { scale: 1, tx: 0, ty: 0, dragging: false, lastX: 0, lastY: 0 };
@@ -46,6 +50,10 @@ function applyData(data) {
   state.bounds = data.bounds;
   state.placed = new Set(data.placed);
   state.dnp    = new Set(data.dnp);
+  state.hidden = {
+    TOP:    new Set((data.hidden && data.hidden.TOP)    || []),
+    BOTTOM: new Set((data.hidden && data.hidden.BOTTOM) || []),
+  };
   state.loaded = true;
   state.step   = -1;
   state.side   = 'TOP';
@@ -122,18 +130,19 @@ document.getElementById('btn-next').addEventListener('click', () => {
 document.getElementById('btn-top').addEventListener('click', () => setSide('TOP'));
 document.getElementById('btn-bot').addEventListener('click', () => setSide('BOTTOM'));
 
-async function clearSelection() {
+function clearSelection() {
   state.step = -1;
   document.querySelectorAll('#bom-body tr.selected').forEach(r => r.classList.remove('selected'));
   updateNavigation();
-  await loadSvg();
+  refreshBoard();
 }
 
-async function setSide(side) {
+function setSide(side) {
   if (side === state.side) return;
   state.side = side;
   updateSideButtons();
-  await loadSvg();
+  applySideFlip();
+  refreshBoard();
 }
 
 function updateSideButtons() {
@@ -213,7 +222,7 @@ function updateBomRow(rowData) {
   }
 }
 
-async function selectStep(idx) {
+function selectStep(idx) {
   if (idx === state.step) return;
   state.step = idx;
   document.querySelectorAll('#bom-body tr').forEach((tr, i) => {
@@ -222,33 +231,121 @@ async function selectStep(idx) {
   const tr = bomBody.children[idx];
   if (tr) tr.scrollIntoView({ block: 'nearest' });
   updateNavigation();
-  await loadSvg();
+  refreshBoard();
   if (state.bom[idx]) {
     setStatus(`Step ${idx + 1} of ${state.bom.length}: ${state.bom[idx].comment}`);
   }
 }
 
 // ── SVG loading ───────────────────────────────────────────────────────────────
+// The base SVG is fetched ONCE per board load. Step / side changes only toggle
+// CSS classes on the already-loaded DOM — no network, no re-parse, and the
+// user's zoom/pan is preserved.
 async function loadSvg() {
-  const url = `/api/svg?step=${state.step}&side=${state.side}`;
   try {
-    const resp = await fetch(url);
-    if (!resp.ok) return;
+    const resp = await fetch('/api/svg');
+    if (!resp.ok) { setStatus(`SVG load failed (HTTP ${resp.status})`); return; }
     const svgText = await resp.text();
     boardTransform.innerHTML = svgText;
-    attachSvgListeners();
+    buildCompIndex();
+    const svg = boardTransform.querySelector('svg');
+    if (svg) svg.addEventListener('dblclick', onSvgDblClick);
+    applySideFlip();
+    refreshBoard();
     fitView();
   } catch (e) {
     setStatus('SVG load error: ' + e.message);
   }
 }
 
-function attachSvgListeners() {
+function buildCompIndex() {
+  compElems.clear();
   const svg = boardTransform.querySelector('svg');
   if (!svg) return;
-  svg.addEventListener('dblclick', onSvgDblClick);
+  svg.querySelectorAll('[data-component]').forEach(el => {
+    const d = el.getAttribute('data-component');
+    let arr = compElems.get(d);
+    if (!arr) { arr = []; compElems.set(d, arr); }
+    arr.push(el);
+  });
 }
 
+// Re-apply dim/hide classes and markers for the current step + side.
+function refreshBoard() {
+  applyHighlight();
+  updateMarkers();
+}
+
+function applyHighlight() {
+  const hidden = state.hidden[state.side] || new Set();
+  const row = state.step >= 0 ? state.bom[state.step] : null;
+  const selected = row ? new Set(row.designators) : null;
+  compElems.forEach((elems, desig) => {
+    const hide = hidden.has(desig);
+    const dim  = !hide && selected !== null && !selected.has(desig);
+    elems.forEach(el => {
+      el.classList.toggle('comp-hidden', hide);
+      el.classList.toggle('comp-dim', dim);
+    });
+  });
+}
+
+// Mirror the board for bottom-side view. Markers live inside the SVG, so they
+// flip along with the components and stay aligned automatically.
+function applySideFlip() {
+  const svg = boardTransform.querySelector('svg');
+  if (!svg) return;
+  svg.style.transformOrigin = '50% 50%';
+  svg.style.transform = state.side === 'BOTTOM' ? 'scaleX(-1)' : '';
+}
+
+// ── Placed / DNP markers ──────────────────────────────────────────────────────
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+function updateMarkers() {
+  const svg = boardTransform.querySelector('svg');
+  if (!svg) return;
+  svg.querySelectorAll('.placed-marker, .dnp-marker').forEach(el => el.remove());
+  if (state.step < 0 || !state.bom[state.step]) return;
+  const hidden = state.hidden[state.side] || new Set();
+  state.bom[state.step].designators.forEach(desig => {
+    if (hidden.has(desig)) return;
+    const b = state.bounds[desig];
+    if (!b || b.length < 4) return;
+    if (state.placed.has(desig))   addPlacedMarker(svg, b);
+    else if (state.dnp.has(desig)) addDnpMarker(svg, b);
+  });
+}
+
+function addPlacedMarker(svg, [x0, y0, x1, y1]) {
+  const rect = document.createElementNS(SVG_NS, 'rect');
+  rect.setAttribute('class', 'placed-marker');
+  rect.setAttribute('x', x0);
+  rect.setAttribute('y', y0);
+  rect.setAttribute('width', Math.abs(x1 - x0));
+  rect.setAttribute('height', Math.abs(y1 - y0));
+  rect.setAttribute('fill', 'none');
+  rect.setAttribute('stroke', '#00cc44');
+  rect.setAttribute('stroke-width', '0.25');
+  svg.appendChild(rect);
+}
+
+function addDnpMarker(svg, [x0, y0, x1, y1]) {
+  [[x0, y0, x1, y1], [x1, y0, x0, y1]].forEach(([ax, ay, bx, by]) => {
+    const ln = document.createElementNS(SVG_NS, 'line');
+    ln.setAttribute('class', 'dnp-marker');
+    ln.setAttribute('x1', ax);
+    ln.setAttribute('y1', ay);
+    ln.setAttribute('x2', bx);
+    ln.setAttribute('y2', by);
+    ln.setAttribute('stroke', '#dd0000');
+    ln.setAttribute('stroke-width', '0.25');
+    ln.setAttribute('stroke-linecap', 'round');
+    svg.appendChild(ln);
+  });
+}
+
+// ── Double-click toggle ───────────────────────────────────────────────────────
 async function onSvgDblClick(e) {
   // Walk up from click target to find data-component attribute
   let el = e.target;
@@ -270,48 +367,14 @@ async function onSvgDblClick(e) {
       setStatus(`Cannot toggle ${desig}: ${resp.error}`);
       return;
     }
-    if (resp.now_placed) {
-      state.placed.add(desig);
-      addPlacedMarker(desig, resp.bounds);
-    } else {
-      state.placed.delete(desig);
-      removePlacedMarker(desig);
-    }
+    if (resp.now_placed) state.placed.add(desig);
+    else state.placed.delete(desig);
     if (resp.bom_row) updateBomRow(resp.bom_row);
+    updateMarkers();
     setStatus((resp.now_placed ? 'Placed: ' : 'Unplaced: ') + desig);
   } catch (e) {
     setStatus('Toggle error: ' + e.message);
   }
-}
-
-// ── Placed markers ────────────────────────────────────────────────────────────
-function addPlacedMarker(desig, bounds) {
-  removePlacedMarker(desig);
-  const svg = boardTransform.querySelector('svg');
-  if (!svg || !bounds || bounds.length < 4) return;
-  const [x0, y0, x1, y1] = bounds;
-  const ns = 'http://www.w3.org/2000/svg';
-  const rect = document.createElementNS(ns, 'rect');
-  rect.setAttribute('class', 'placed-marker');
-  rect.setAttribute('data-for', desig);
-  rect.setAttribute('x', x0);
-  rect.setAttribute('y', y0);
-  rect.setAttribute('width', Math.abs(x1 - x0));
-  rect.setAttribute('height', Math.abs(y1 - y0));
-  rect.setAttribute('fill', 'none');
-  rect.setAttribute('stroke', '#00cc44');
-  rect.setAttribute('stroke-width', '0.25');
-  rect.style.pointerEvents = 'none';
-  svg.appendChild(rect);
-}
-
-function removePlacedMarker(desig) {
-  const svg = boardTransform.querySelector('svg');
-  if (!svg) return;
-  const esc = CSS.escape(desig);
-  // Match both JS-added rects (.placed-marker) and server-rendered groups (data-placed-marker)
-  svg.querySelectorAll(`.placed-marker[data-for="${esc}"], [data-placed-marker="${esc}"]`)
-     .forEach(el => el.remove());
 }
 
 // ── Pan / zoom ────────────────────────────────────────────────────────────────
@@ -409,6 +472,7 @@ document.addEventListener('mouseup', () => {
 // ── Utility ───────────────────────────────────────────────────────────────────
 async function fetchJson(url, options) {
   const resp = await fetch(url, options);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${url}`);
   return resp.json();
 }
 

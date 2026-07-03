@@ -7,7 +7,7 @@ from PySide6.QtCore import QByteArray, Qt, QTimer, Signal
 from PySide6.QtGui import QPainter, QTransform
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtSvgWidgets import QGraphicsSvgItem
-from PySide6.QtWidgets import QGraphicsScene, QGraphicsView
+from PySide6.QtWidgets import QGraphicsItem, QGraphicsScene, QGraphicsView
 
 _ZOOM_FACTOR = 1.15
 _ZOOM_MIN = 0.02
@@ -56,9 +56,14 @@ class PcbViewer(QGraphicsView):
 
         if self._svg_item is None:
             self._svg_item = QGraphicsSvgItem()
+            # Cache the rendered SVG as a pixmap at device resolution so panning
+            # blits the cache instead of re-rendering the whole SVG every frame.
+            # The cache is regenerated automatically when the zoom level changes.
+            self._svg_item.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
             self._scene.addItem(self._svg_item)
 
         self._svg_item.setSharedRenderer(self._renderer)
+        self._svg_item.update()  # invalidate the device-coordinate cache for the new content
         self._apply_flip()
 
     def set_flip(self, flipped: bool) -> None:

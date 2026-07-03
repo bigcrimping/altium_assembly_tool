@@ -1,16 +1,17 @@
-"""web_server.py — Flask web server providing browser-based UI."""
+"""web_server.py — Flask web server providing browser-based UI.
+
+The server sends the base SVG once; all per-step highlighting (dimming,
+side hiding, flip, placed/DNP markers) happens client-side in app.js.
+"""
 from __future__ import annotations
 
 import threading
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from pcb_model import PcbModel, SVG_NS, parse_prjpcb_dnp
+from pcb_model import PcbModel, parse_prjpcb_dnp
 from population_state import PopulationState
-
-ET.register_namespace("", SVG_NS)
 
 
 class WebServer:
@@ -51,8 +52,8 @@ class WebServer:
 
     def _bom_row_dict(self, idx: int, entry, placed: frozenset[str], dnp: frozenset[str]) -> dict:
         visible = entry.designators
-        top_refs = [d for d in visible if "BOTTOM" not in entry.designator_layers.get(d, "TOP").upper()]
-        bot_refs = [d for d in visible if "BOTTOM" in entry.designator_layers.get(d, "TOP").upper()]
+        top_refs = entry.top_refs
+        bot_refs = entry.bot_refs
         effective = placed | dnp
         placed_count = sum(1 for d in visible if d in effective)
         all_done = bool(visible) and all(d in effective for d in visible)
@@ -71,27 +72,6 @@ class WebServer:
             "top_done": top_done,
             "bot_done": bot_done,
         }
-
-    def _build_svg(self, model: PcbModel, step: int, side: str,
-                   placed: frozenset[str], dnp: frozenset[str]) -> str:
-        hidden = model.hidden_designators_for_side(side)
-        if 0 <= step < len(model.bom):
-            entry = model.bom[step]
-            visible = set(entry.designators)
-            svg = model.svg_for_designators(visible, hidden or None)
-            placed_here = frozenset(d for d in visible if d in placed and d not in hidden)
-            dnp_here = frozenset(d for d in visible if d in dnp and d not in hidden)
-        else:
-            svg = model.side_filtered_svg(side)
-            placed_here = frozenset()
-            dnp_here = frozenset()
-        if placed_here:
-            svg = model.add_placed_markers(svg, placed_here)
-        if dnp_here:
-            svg = model.add_dnp_markers(svg, dnp_here)
-        if side == "BOTTOM":
-            svg = _flip_svg_horizontal(svg)
-        return svg
 
     def _build_app(self) -> Flask:
         web_dir = Path(__file__).parent / "web"
@@ -123,17 +103,21 @@ class WebServer:
                     "bounds": bounds,
                     "placed": list(placed),
                     "dnp": list(dnp),
+                    "viewbox": list(model.viewbox),
+                    # Designators hidden when viewing each side
+                    "hidden": {
+                        "TOP": sorted(model.hidden_designators_for_side("TOP")),
+                        "BOTTOM": sorted(model.hidden_designators_for_side("BOTTOM")),
+                    },
                 })
 
         @app.route("/api/svg")
         def api_svg():
-            step = request.args.get("step", "-1", type=int)
-            side = request.args.get("side", "TOP").upper()
             with self._lock:
                 model = self._model
                 if model is None:
                     return ("No model loaded", 503)
-                svg = self._build_svg(model, step, side, self._placement.placed, self._dnp)
+                svg = model.base_svg
             return svg, 200, {"Content-Type": "image/svg+xml; charset=utf-8"}
 
         @app.route("/api/toggle", methods=["POST"])
@@ -163,27 +147,10 @@ class WebServer:
                     if desig in e.designators:
                         row_data = self._bom_row_dict(i, e, placed, dnp)
                         break
-                bounds = list(model.component_bounds.get(desig, [0, 0, 0, 0]))
-                # Flip bounds X for bottom-side view so marker aligns with flipped SVG
-                if side == "BOTTOM" and bounds and model.component_bounds.get(desig):
-                    vb_x, _ = model.viewbox_origin
-                    try:
-                        root = ET.fromstring(model.base_svg)
-                        vb = root.get("viewBox", "").split()
-                        if len(vb) >= 3:
-                            vw = float(vb[2])
-                            x0_vb = float(vb[0])
-                            x0, y0, x1, y1 = bounds
-                            new_x0 = x0_vb + (x0_vb + vw - x1)
-                            new_x1 = x0_vb + (x0_vb + vw - x0)
-                            bounds = [new_x0, y0, new_x1, y1]
-                    except Exception:
-                        pass
                 return jsonify({
                     "ok": True,
                     "designator": desig,
                     "now_placed": now_placed,
-                    "bounds": bounds,
                     "bom_row": row_data,
                 })
 
@@ -203,27 +170,3 @@ class WebServer:
                 return jsonify({"ok": False, "error": f"Load error: {exc}"})
 
         return app
-
-
-# ------------------------------------------------------------------
-# SVG flip helper (module-level, no class state needed)
-# ------------------------------------------------------------------
-
-def _flip_svg_horizontal(svg: str) -> str:
-    """Mirror SVG content horizontally around the board centre (for bottom-side view)."""
-    try:
-        root = ET.fromstring(svg)
-    except ET.ParseError:
-        return svg
-    vb = root.get("viewBox", "").split()
-    if len(vb) < 4:
-        return svg
-    x0, y0, vw, vh = float(vb[0]), float(vb[1]), float(vb[2]), float(vb[3])
-    # Mirror: translate right by (2*x0 + vw), then scale(-1, 1)
-    children = list(root)
-    g = ET.SubElement(root, f"{{{SVG_NS}}}g")
-    g.set("transform", f"translate({2 * x0 + vw:.4f}, 0) scale(-1, 1)")
-    for child in children:
-        root.remove(child)
-        g.append(child)
-    return ET.tostring(root, encoding="unicode", xml_declaration=False)
