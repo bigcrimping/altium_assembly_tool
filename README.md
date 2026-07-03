@@ -10,7 +10,9 @@ A 2D PCB assembly viewer for Altium `.PcbDoc` files built with PySide6. Step thr
 
 ### 1. Open a PCB file
 
-Click **Open File** and select a `.PcbDoc` file. A progress dialog tracks the load. Once done, the board renders in the top pane and the BOM table populates below.
+Click **Open File** and select a `.PcbDoc` file (the dropdown arrow next to it lists recently opened boards). A progress dialog tracks the load. Once done, the board renders in the top pane and the BOM table populates below.
+
+If a single `.PrjPcb` sits in the same folder it is loaded automatically for DNP data, and a `<board>.popstate.json` next to the board restores your saved placement progress.
 
 
 
@@ -47,6 +49,13 @@ Navigate with:
 - **Up / Down arrow keys** (when the BOM table does not have focus)
 - **Clear Selection** to return to the full board view
 
+Selected components show yellow **designator labels** on the board (toggle with the **Labels** button). Use the **filter box** above the BOM to search by designator, name, or description. **Hide Fitted** hides fully-placed rows.
+
+Extra view helpers:
+- **Fit Selection** zooms to the selected row's components; **Auto Zoom** does this automatically on every step.
+- **Single-click** any component on the board to identify it — its designator, value, and description appear in the status bar and its BOM row flashes.
+- The status bar's right side shows overall progress ("Fitted 135/456 (29.6%)").
+
 ### 4. Mark components as placed
 
 With a BOM row selected, **double-click a component pad** in the board view to mark it as placed:
@@ -63,7 +72,7 @@ With a BOM row selected, **double-click a component pad** in the board view to m
 
 > Double-click only works for refs in the currently selected BOM row, on the currently viewed side. This prevents accidental mis-clicks on dense boards.
 
-Double-clicking a placed component toggles it back to unplaced.
+Double-clicking a placed component toggles it back to unplaced. **Ctrl+Z / Ctrl+Y** undo and redo placement toggles.
 
 ### 5. Switch board sides
 
@@ -73,8 +82,9 @@ Use **Top Side / Bottom Side** in the toolbar to flip the board and view the oth
 
 - **Save State** — writes current placement progress to a `.json` file (defaults to the same folder as the `.PcbDoc`).
 - **Open State** — reloads a previously saved session.
+- **Auto Save** — when toggled on, progress is saved to `<board>.popstate.json` after every change (the setting is remembered between sessions).
 
-The state file is plain JSON containing only the list of placed designators.
+The state file is plain JSON containing only the list of placed designators. If you have unsaved progress, the app asks before closing or loading another file.
 
 ---
 
@@ -82,9 +92,13 @@ The state file is plain JSON containing only the list of placed designators.
 
 | Action | Control |
 |---|---|
-| Zoom | Scroll wheel |
-| Pan | Left-drag |
+| Zoom | Scroll wheel (pinch on touch screens in browser mode) |
+| Pan | Left-drag (one-finger drag on touch screens in browser mode) |
 | Fit to window | **Fit View** button or **Ctrl+0** |
+| Zoom to selected row | **Fit Selection** button (or **Auto Zoom** toggle) |
+| Identify a component | Single-click it |
+| Mark placed / unplaced | Double-click it (double-tap on touch) |
+| Undo / redo a toggle | **Ctrl+Z** / **Ctrl+Y** |
 
 ---
 
@@ -109,11 +123,13 @@ The state file is plain JSON containing only the list of placed designators.
 
 | Section | Controls |
 |---|---|
-| *(file)* | Open File, Load .PrjPcb, filename |
+| *(file)* | Open File (with recent-files dropdown), Load .PrjPcb, filename |
 | **Steps** | ◄ Prev, Next ►, step counter |
-| **View** | Fit View, Clear Selection |
-| **Config** | Save State, Open State |
+| **View** | Fit View, Fit Selection, Auto Zoom, Labels, Clear Selection |
+| **Config** | Save State, Open State, Auto Save |
 | **Board Side** | Top Side, Bottom Side |
+
+The BOM panel header has a **Hide Fitted** toggle and a **filter box** (matches designators, names, and descriptions). Hovering the Name column shows the component's description.
 
 ---
 
@@ -123,6 +139,7 @@ The state file is plain JSON containing only the list of placed designators.
 |---|---|
 | Green border box on component | Manually marked as placed |
 | Red X on component | DNP / No Fit (from .PrjPcb) |
+| Yellow designator label | Component of the selected BOM row (Labels toggle) |
 | Bold green ref in BOM | That designator is placed |
 | Red ref in BOM | That designator is DNP |
 | Green cell in BOM | All refs on that side are done |
@@ -175,12 +192,13 @@ Click **Open PCB** in the toolbar at any time to reload or switch files.
 
 | Feature | Desktop | Browser |
 |---|---|---|
-| File picker | Native OS dialog | Type the full file path |
-| DNP data | **Load .PrjPcb** button | Entered in the load dialog alongside the PCB path |
-| Save / load state | **Save State** / **Open State** buttons | Auto-saved on every toggle to `<board>.popstate.json` in the same folder |
-| Keyboard shortcuts | ↑ / ↓ | ↑ ↓ ← → (all four arrows step through BOM), **0** fits the view |
+| File picker | Native OS dialog + recent-files dropdown | Type the full file path (recent paths listed in the dialog) |
+| DNP data | **Load .PrjPcb** button, or auto-loaded from the board's folder | Entered in the load dialog alongside the PCB path |
+| Save / load state | **Save State** / **Open State** buttons, optional **Auto Save** | Auto-saved on every toggle to `<board>.popstate.json` in the same folder |
+| Keyboard shortcuts | ↑ / ↓, **Ctrl+Z / Ctrl+Y** | ↑ ↓ ← → (all four arrows step through BOM), **0** fits the view, **Ctrl+Z / Ctrl+Y** |
+| Touch screens | — | One-finger pan, pinch zoom, tap to identify, double-tap to mark placed |
 
-Everything else — BOM table, component highlighting, double-click to mark placed, DNP overlays, top/bottom side switching — works identically.
+Everything else — BOM table with search and Hide Fitted, component highlighting, designator labels, click-to-identify, Fit Selection / Auto Zoom, progress indicator, double-click to mark placed, DNP overlays, top/bottom side switching — works identically.
 
 ---
 

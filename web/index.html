@@ -21,11 +21,18 @@
   </div>
   <div class="tb-group">
     <button class="btn" id="btn-fit" disabled>Fit View</button>
+    <button class="btn" id="btn-fit-sel" disabled title="Zoom to the selected BOM row's components">Fit Selection</button>
+    <button class="btn" id="btn-auto-zoom" disabled title="Automatically zoom to each BOM row as you step through">Auto Zoom</button>
+    <button class="btn" id="btn-labels" disabled title="Show designator labels on the selected row's components">Labels</button>
     <button class="btn" id="btn-clear" disabled>Clear Selection</button>
+    <button class="btn" id="btn-dnp" disabled title="Highlight every part marked Do Not Fit (DNP) across the board — a quick check of parts that should not be fitted">Show DNP</button>
   </div>
   <div class="tb-group">
     <button class="btn active-side" id="btn-top" disabled>Top Side</button>
     <button class="btn" id="btn-bot" disabled>Bottom Side</button>
+  </div>
+  <div class="tb-group">
+    <span class="step-label" id="progress-label"></span>
   </div>
 </div>
 
@@ -37,6 +44,7 @@
     <input type="text" id="pcb-path" placeholder="/path/to/board.PcbDoc" autocomplete="off">
     <label>Project File Path (.PrjPcb) &mdash; optional, for DNP data</label>
     <input type="text" id="prj-path" placeholder="/path/to/project.PrjPcb (optional)" autocomplete="off">
+    <div id="recent-list" class="hidden"></div>
     <div id="load-error" class="hidden"></div>
     <div class="btn-row">
       <button class="btn btn-primary" id="btn-load-file">Load</button>
@@ -53,7 +61,11 @@
   </div>
   <div id="resizer"></div>
   <div id="bom-panel">
-    <div class="bom-header">Bill of Materials</div>
+    <div class="bom-header">
+      <span>Bill of Materials</span>
+      <button class="btn" id="btn-hide-fitted" disabled title="Hide BOM rows where every part is already placed (or marked DNP)">Hide Fitted</button>
+      <input type="text" id="bom-search" placeholder="Filter by designator or name&hellip;" autocomplete="off" disabled>
+    </div>
     <div id="bom-scroll">
       <table id="bom-table">
         <thead>

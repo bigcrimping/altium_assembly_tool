@@ -62,6 +62,7 @@ class WebServer:
         return {
             "index": idx,
             "comment": entry.comment,
+            "description": entry.description,
             "quantity": len(visible),
             "designators": visible,
             "top_refs": top_refs,

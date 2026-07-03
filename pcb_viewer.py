@@ -3,7 +3,7 @@ pcb_viewer.py — QGraphicsView-based SVG display widget with zoom and pan.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QByteArray, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QPoint, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QPainter, QTransform
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtSvgWidgets import QGraphicsSvgItem
@@ -21,10 +21,15 @@ class PcbViewer(QGraphicsView):
     - Mouse wheel: zoom centered on cursor
     - Left-button drag: pan
     - Ctrl+0: fit board to view
+    - Click (no drag): emits clicked_item(item_x, item_y) in SVG item space
     - Double-click: emits double_clicked_item(item_x, item_y) in SVG item space
     """
 
     double_clicked_item = Signal(float, float)
+    clicked_item = Signal(float, float)
+
+    # A press/release pair closer together than this is a click, not a pan.
+    _CLICK_SLOP_PX = 4
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -33,6 +38,7 @@ class PcbViewer(QGraphicsView):
         self._renderer: QSvgRenderer | None = None
         self._cumulative_scale: float = 1.0
         self._flipped: bool = False
+        self._press_pos: QPoint | None = None
 
         self.setScene(self._scene)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
@@ -75,6 +81,14 @@ class PcbViewer(QGraphicsView):
     def fit_to_view(self) -> None:
         self._fit_to_view()
 
+    def zoom_to_item_rect(self, rect: QRectF) -> None:
+        """Fit the view to a rectangle given in SVG item coordinates."""
+        if self._svg_item is None or rect.isEmpty():
+            return
+        scene_rect = self._svg_item.mapRectToScene(rect)
+        self.fitInView(scene_rect, Qt.AspectRatioMode.KeepAspectRatio)
+        self._cumulative_scale = 1.0
+
     def _apply_flip(self) -> None:
         if self._svg_item is None:
             return
@@ -116,6 +130,24 @@ class PcbViewer(QGraphicsView):
         if _ZOOM_MIN <= new_scale <= _ZOOM_MAX:
             self._cumulative_scale = new_scale
             self.scale(factor, factor)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = event.pos()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        super().mouseReleaseEvent(event)
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._press_pos is not None
+            and self._svg_item is not None
+            and (event.pos() - self._press_pos).manhattanLength() < self._CLICK_SLOP_PX
+        ):
+            scene_pos = self.mapToScene(event.pos())
+            item_pos = self._svg_item.mapFromScene(scene_pos)
+            self.clicked_item.emit(item_pos.x(), item_pos.y())
+        self._press_pos = None
 
     def mouseDoubleClickEvent(self, event) -> None:
         if self._svg_item is not None and event.button() == Qt.MouseButton.LeftButton:

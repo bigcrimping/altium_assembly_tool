@@ -16,6 +16,13 @@ _MIL_TO_MM = 0.0254
 
 ET.register_namespace("", SVG_NS)
 
+# Colour-blind-safe palette (Okabe-Ito). Shared by the board highlight + status
+# markers so top/bottom, placed, and DNP stay distinguishable for all viewers.
+# The web UI mirrors these values in web/app.js.
+SELECT_HIGHLIGHT_COLOR = "#56B4E9"  # sky blue — the selected BOM row's components
+PLACED_MARKER_COLOR    = "#009E73"  # bluish green — placed
+DNP_MARKER_COLOR       = "#D55E00"  # vermillion — DNP / no-fit
+
 # ComponentKind values to exclude from assembly BOM
 _BOM_EXCLUDE_KIND_VALUES = frozenset({1, 2, 4, 5})
 
@@ -182,7 +189,7 @@ class PcbModel:
                     f'<g data-placed-marker="{attr}">'
                     f'<rect x="{x0:.4f}" y="{y0:.4f}"'
                     f' width="{x1 - x0:.4f}" height="{y1 - y0:.4f}"'
-                    f' fill="none" stroke="#00cc44" stroke-width="0.250" /></g>'
+                    f' fill="none" stroke="{PLACED_MARKER_COLOR}" stroke-width="0.250" /></g>'
                 )
         return _insert_before_svg_close(svg, "".join(frags))
 
@@ -196,28 +203,103 @@ class PcbModel:
             for x0, y0, x1, y1 in self._instance_bounds.get(desig, ()):
                 lines = "".join(
                     f'<line x1="{ax:.4f}" y1="{ay:.4f}" x2="{bx:.4f}" y2="{by:.4f}"'
-                    f' stroke="#dd0000" stroke-width="0.250" stroke-linecap="round" />'
+                    f' stroke="{DNP_MARKER_COLOR}" stroke-width="0.250" stroke-linecap="round" />'
                     for ax, ay, bx, by in ((x0, y0, x1, y1), (x1, y0, x0, y1))
                 )
                 frags.append(f'<g data-dnp-marker="{attr}">{lines}</g>')
         return _insert_before_svg_close(svg, "".join(frags))
 
+    # Labels are sized in fractions of a millimetre, but the board SVG is drawn in
+    # millimetre user units. QSvgRenderer rounds a <text> font-size attribute to an
+    # integer *pixel* size, so a sub-1mm size collapses to 0 — spamming
+    # "QFont::setPixelSize: Pixel size <= 0" and failing glyph-outline generation.
+    # We instead emit every label at a fixed legible font size and scale it into
+    # place with a transform, so the pixel size is never rounded to zero.
+    _LABEL_FONT_PX = 64.0
+
+    def add_designator_labels(self, svg: str, designators: set[str] | frozenset[str],
+                              mirrored: bool = False) -> str:
+        """Overlay designator text labels centered on the given components.
+
+        mirrored: pass True when the viewer flips the board horizontally
+        (bottom-side view). Each label then carries a local mirror transform so
+        the outer flip leaves the text readable at the mirrored position.
+        """
+        if not designators:
+            return svg
+        base = self._LABEL_FONT_PX
+        frags = []
+        for desig in designators:
+            label = html.escape(desig)
+            attr = html.escape(desig, quote=True)
+            for x0, y0, x1, y1 in self._instance_bounds.get(desig, ()):
+                w, h = x1 - x0, y1 - y0
+                # Fit within the part: scale to the short side, shrink for long refs,
+                # floor so tiny parts still get a legible label.
+                size = min(min(w, h) * 0.55, (w * 1.6) / max(len(desig), 1))
+                size = max(size, 0.25)
+                cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+                s = size / base
+                # Negative x-scale on the bottom side counters the viewer's board flip.
+                sx = -s if mirrored else s
+                frags.append(
+                    f'<text x="0" y="{base * 0.35:.4f}" font-size="{base:.0f}"'
+                    f' text-anchor="middle" fill="#ffe000" font-family="sans-serif"'
+                    f' data-desig-label="{attr}"'
+                    f' transform="translate({cx:.4f} {cy:.4f}) scale({sx:.6f} {s:.6f})"'
+                    f'>{label}</text>'
+                )
+        return _insert_before_svg_close(svg, "".join(frags))
+
     def svg_for_designators(self, designators: set[str], hide_designators: set[str] | None = None) -> str:
-        """Return the base SVG dimmed to the given designator set, with hide_designators fully hidden."""
+        """Return the base SVG with the selected designators recoloured to the
+        highlight colour, every other component dimmed, and hide_designators hidden.
+
+        Recolouring overwrites each element's real fill/stroke; 'none' fills and
+        gradient references (e.g. the pin-1 stripe) are left untouched.
+        """
         if not designators and not hide_designators:
             return self._base_svg
+        if self._root is None:
+            return self._base_svg
         hide = hide_designators or frozenset()
-        opacity: dict[str, str] = {}
-        for desig in self._comp_elems:
-            if desig in hide:
-                opacity[desig] = "0"
-            elif desig not in designators:
-                opacity[desig] = "0.04"
-        return self._svg_with_opacity(opacity)
+        touched: list[tuple[ET.Element, str, str | None]] = []
+        try:
+            for desig, elems in self._comp_elems.items():
+                for elem in elems:
+                    if desig in hide:
+                        self._override(elem, "opacity", "0", touched)
+                    elif desig in designators:
+                        self._recolor(elem, SELECT_HIGHLIGHT_COLOR, touched)
+                    else:
+                        self._override(elem, "opacity", "0.20", touched)
+            return ET.tostring(self._root, encoding="unicode", xml_declaration=False)
+        finally:
+            for elem, attr, old in touched:
+                if old is None:
+                    elem.attrib.pop(attr, None)
+                else:
+                    elem.set(attr, old)
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _override(elem: ET.Element, attr: str, value: str,
+                  touched: list[tuple[ET.Element, str, str | None]]) -> None:
+        """Set an attribute, recording its prior value so it can be reverted."""
+        touched.append((elem, attr, elem.get(attr)))
+        elem.set(attr, value)
+
+    @classmethod
+    def _recolor(cls, elem: ET.Element, color: str,
+                 touched: list[tuple[ET.Element, str, str | None]]) -> None:
+        """Recolour an element's real fill/stroke, preserving 'none' and url(...) refs."""
+        for attr in ("fill", "stroke"):
+            val = elem.get(attr)
+            if val and val != "none" and not val.startswith("url("):
+                cls._override(elem, attr, color, touched)
 
     def _svg_with_opacity(self, opacity_by_desig: dict[str, str]) -> str:
         """Serialize the cached tree with per-component opacity applied, then revert."""
