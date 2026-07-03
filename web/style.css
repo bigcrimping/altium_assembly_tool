@@ -117,6 +117,12 @@ body {
 }
 #board-transform svg { display: block; }
 
+/* Client-side highlighting — toggled per component by app.js */
+#board-transform svg .comp-dim    { opacity: 0.04; }
+#board-transform svg .comp-hidden { opacity: 0; }
+#board-transform svg .placed-marker,
+#board-transform svg .dnp-marker  { pointer-events: none; }
+
 /* ── BOM table ────────────────────────────────────────────────── */
 .bom-header {
   padding: 3px 8px;
