@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="icon.svg" width="96" height="96" alt="Altium Assembly Tool icon">
+  <img src="assets/icon.svg" width="96" height="96" alt="Altium Assembly Tool icon">
 </p>
 
 # Altium Assembly Tool
 
-A 2D PCB assembly viewer for Altium `.PcbDoc` files built with PySide6. Step through the BOM, track which components have been placed, mark No-Fit parts, and save progress between sessions.
+A 2D PCB assembly viewer for Altium `.PcbDoc` files built with PySide6 and Altium-monkey. Step through the BOM, track which components have been placed, mark No-Fit parts, and save progress between sessions.
 
 ## How to use 
 
@@ -18,13 +18,13 @@ If a single `.PrjPcb` sits in the same folder it is loaded automatically for DNP
 
 
 <p align="center">
-  <img width="1123" height="817" alt="image" src="https://github.com/user-attachments/assets/3db23893-6aae-45d7-9ed6-06fcc304c5e6" />
+  <img src="assets/overview.png" width="900" alt="Board loaded — overview with the BOM table populated below" />
 </p>
 
 
 
 <p align="center">
-  <img width="1123" height="817" alt="image" src="https://github.com/user-attachments/assets/71c34ead-8996-4961-9d05-f140a5a4d59d" />
+  <img src="assets/bom-selected.png" width="900" alt="A BOM row selected — its components highlighted with designator labels, others dimmed" />
 </p>
 
 
@@ -37,7 +37,7 @@ Click **Load .PrjPcb** and select the `.PrjPcb` file for the same project. This 
 - DNP parts count as already placed for the purpose of row completion — so a row with one real part and one DNP part turns green once the real part is double-clicked.
 
 <p align="center">
-  <img width="1123" height="817" alt="image" src="https://github.com/user-attachments/assets/80506f31-d1cf-45f8-942f-d8ec7a1be7a9" />
+  <img src="assets/dnp.png" width="900" alt="DNP parts shown with red X markers on the board and red refs in the BOM" />
 </p>
 
 ### 3. Step through the BOM
@@ -62,7 +62,7 @@ With a BOM row selected, **double-click a component pad** in the board view to m
 
 
 <p align="center">
-  <img width="1123" height="817" alt="image" src="https://github.com/user-attachments/assets/d91ca8db-aebe-45e8-a8c5-3d9b888c068b" />
+  <img src="assets/placed.png" width="900" alt="Placed components with green border boxes and bold green refs in the BOM" />
 </p>
 
 - A **green border box** appears around the component.
@@ -154,7 +154,7 @@ The BOM panel header has a **Hide Fitted** toggle and a **filter box** (matches 
 The tool includes a browser-based UI as an alternative to the desktop window. It runs a local Flask web server and opens your default browser automatically — useful when you want to access the interface remotely or avoid the PySide6 dependency.
 
 <p align="center">
-  <img width="1672" height="1237" alt="image" src="https://github.com/user-attachments/assets/83ca7da3-bf46-4e48-b964-b4218a8f8258" />
+  <img src="assets/browser.png" width="900" alt="Browser-mode UI running in a web browser" />
 </p>
 
 
@@ -296,7 +296,7 @@ This installs PySide6 and `altium-monkey` (fetched directly from GitHub).
 python main.py
 ```
 
-You should see the Altium Assembly Steps window open.
+You should see the Altium Assembly Tool window open.
 
 ---
 

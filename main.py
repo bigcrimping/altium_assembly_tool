@@ -1,5 +1,5 @@
 """
-main.py — Altium Assembly Steps: 2D PCB BOM viewer.
+main.py — Altium Assembly Tool: 2D PCB BOM viewer.
 """
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ from pcb_model import BomEntry, PcbModel, parse_prjpcb_dnp
 from pcb_viewer import PcbViewer
 from population_state import PopulationState
 
-ICON_PATH = Path(__file__).parent / "icon.svg"
+ICON_PATH = Path(__file__).parent / "assets" / "icon.svg"
 
 
 class PcbLoadWorker(QThread):
@@ -279,7 +279,7 @@ class MainWindow(QMainWindow):
         self._dnp: frozenset[str] = frozenset()
         self._undo: list[str] = []
         self._redo: list[str] = []
-        self._settings = QSettings("altium_assembly_tool", "AltiumAssemblyTool")
+        self._settings = QSettings("altium_assembly_tool", "Altium Assembly Tool")
 
         self._build_ui()
         self._connect_signals()
@@ -1285,7 +1285,7 @@ def main() -> None:
         return
 
     app = QApplication(sys.argv[:1])  # don't pass argparse args to Qt
-    app.setApplicationName("Altium Assembly Steps")
+    app.setApplicationName("Altium Assembly Tool")
     app.setWindowIcon(QIcon(str(ICON_PATH)))
     window = MainWindow()
     window.show()
