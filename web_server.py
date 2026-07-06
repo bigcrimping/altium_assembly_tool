@@ -85,7 +85,7 @@ class WebServer:
 
         @app.route("/favicon.svg")
         def favicon():
-            return send_from_directory(str(Path(__file__).parent), "icon.svg")
+            return send_from_directory(str(Path(__file__).parent / "assets"), "icon.svg")
 
         @app.route("/api/data")
         def api_data():
