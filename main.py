@@ -6,7 +6,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, QSettings, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QPoint, QRect, QRectF, QSettings, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (
     QAbstractTextDocumentLayout,
     QAction,
@@ -24,18 +24,19 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLayout,
     QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
     QProgressDialog,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QStyle,
     QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
-    QToolBar,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -182,6 +183,83 @@ QPushButton:checked {
 """
 
 
+class FlowLayout(QLayout):
+    """Lays widgets left-to-right and wraps them onto new rows as width runs out.
+
+    Replaces a single QToolBar for the main controls: on narrow windows the
+    buttons flow onto additional rows — all staying visible and directly
+    clickable — instead of collapsing into the hard-to-use overflow ('>>')
+    popup that QToolBar shows when its items don't fit on one line.
+    """
+
+    def __init__(self, parent=None, margin: int = 4, hspacing: int = 6,
+                 vspacing: int = 4) -> None:
+        super().__init__(parent)
+        self._items: list = []
+        self._hspace = hspacing
+        self._vspace = vspacing
+        self.setContentsMargins(margin, margin, margin, margin)
+
+    def addItem(self, item) -> None:  # noqa: N802 (Qt override)
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int):  # noqa: N802 (Qt override)
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index: int):  # noqa: N802 (Qt override)
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):  # noqa: N802 (Qt override)
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 (Qt override)
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 (Qt override)
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect: QRect) -> None:  # noqa: N802 (Qt override)
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 (Qt override)
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:  # noqa: N802 (Qt override)
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        size += QSize(margins.left() + margins.right(),
+                      margins.top() + margins.bottom())
+        return size
+
+    def _do_layout(self, rect: QRect, test_only: bool) -> int:
+        margins = self.contentsMargins()
+        effective = rect.adjusted(
+            margins.left(), margins.top(), -margins.right(), -margins.bottom()
+        )
+        x = effective.x()
+        y = effective.y()
+        line_height = 0
+        for item in self._items:
+            item_size = item.sizeHint()
+            next_x = x + item_size.width() + self._hspace
+            if next_x - self._hspace > effective.right() and line_height > 0:
+                x = effective.x()
+                y = y + line_height + self._vspace
+                next_x = x + item_size.width() + self._hspace
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), item_size))
+            x = next_x
+            line_height = max(line_height, item_size.height())
+        return y + line_height - rect.y() + margins.bottom()
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -211,9 +289,14 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        toolbar = QToolBar("Main", self)
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
+        # Wrapping toolbar: a flow layout so controls reflow onto extra rows on
+        # narrow windows instead of hiding behind a QToolBar overflow popup.
+        toolbar_widget = QWidget()
+        flow = FlowLayout(toolbar_widget)
+        tb_policy = toolbar_widget.sizePolicy()
+        tb_policy.setHeightForWidth(True)
+        tb_policy.setVerticalPolicy(QSizePolicy.Policy.Minimum)
+        toolbar_widget.setSizePolicy(tb_policy)
 
         self._btn_open = QToolButton()
         self._btn_open.setText("Open File")
@@ -284,33 +367,32 @@ class MainWindow(QMainWindow):
         self._view_side_group.setExclusive(True)
 
         def _section(label: str) -> None:
-            toolbar.addSeparator()
             lbl = QLabel(label)
             lbl.setStyleSheet(
                 "QLabel { color: #999; font-size: 9px; font-weight: bold;"
                 " padding: 0 4px 0 6px; }"
             )
-            toolbar.addWidget(lbl)
+            flow.addWidget(lbl)
 
         for w in (self._btn_open, self._btn_load_prjpcb, self._lbl_filename):
-            toolbar.addWidget(w)
+            flow.addWidget(w)
 
         _section("Steps")
         for w in (self._btn_prev, self._btn_next, self._lbl_step):
-            toolbar.addWidget(w)
+            flow.addWidget(w)
 
         _section("View")
         for w in (self._btn_fit, self._btn_fit_sel, self._btn_auto_zoom, self._btn_labels,
                   self._btn_clear, self._btn_dnp_view):
-            toolbar.addWidget(w)
+            flow.addWidget(w)
 
         _section("Config")
         for w in (self._btn_save_state, self._btn_open_state, self._btn_auto_save):
-            toolbar.addWidget(w)
+            flow.addWidget(w)
 
         _section("Board Side")
         for w in (self._btn_top_view, self._btn_bottom_view):
-            toolbar.addWidget(w)
+            flow.addWidget(w)
 
         self._btn_prev.setEnabled(False)
         self._btn_next.setEnabled(False)
@@ -323,9 +405,15 @@ class MainWindow(QMainWindow):
         self._btn_top_view.setEnabled(False)
         self._btn_bottom_view.setEnabled(False)
 
-        # Central splitter — viewer on top, BOM panel on bottom
+        # Central layout — wrapping toolbar on top, splitter below
         splitter = QSplitter(Qt.Orientation.Vertical)
-        self.setCentralWidget(splitter)
+        central = QWidget()
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(toolbar_widget)
+        central_layout.addWidget(splitter, 1)
+        self.setCentralWidget(central)
 
         # Top: PCB viewer
         self._viewer = PcbViewer()
