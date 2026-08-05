@@ -43,6 +43,8 @@ class BomEntry:
     quantity: int
     designators: list[str]
     description: str = ""
+    part_number: str = ""
+    extra_text: str = ""
     designator_layers: dict[str, str] = field(default_factory=dict)
     top_refs: list[str] = field(default_factory=list)
     bot_refs: list[str] = field(default_factory=list)
@@ -264,28 +266,35 @@ class PcbModel:
                 )
         return _insert_before_svg_close(svg, "".join(frags))
 
-    def svg_for_designators(self, designators: set[str], hide_designators: set[str] | None = None) -> str:
+    def svg_for_designators(
+        self,
+        designators: set[str],
+        hide_designators: set[str] | None = None,
+        show_silkscreen: bool = False,
+    ) -> str:
         """Return the base SVG with the selected designators recoloured to the
         highlight colour, every other component dimmed, and hide_designators hidden.
-
-        Recolouring overwrites each element's real fill/stroke; 'none' fills and
-        gradient references (e.g. the pin-1 stripe) are left untouched.
         """
-        if not designators and not hide_designators:
-            return self._base_svg
         if self._root is None:
             return self._base_svg
         hide = hide_designators or frozenset()
         touched: list[tuple[ET.Element, str, str | None]] = []
         try:
-            for desig, elems in self._comp_elems.items():
-                for elem in elems:
-                    if desig in hide:
-                        self._override(elem, "opacity", "0", touched)
-                    elif desig in designators:
-                        self._recolor(elem, SELECT_HIGHLIGHT_COLOR, touched)
-                    else:
-                        self._override(elem, "opacity", "0.20", touched)
+            if show_silkscreen:
+                for elem in self._root.iter():
+                    if "silkscreen-element" in (elem.get("class") or ""):
+                        self._override(elem, "display", "inline", touched)
+                        self._override(elem, "opacity", "0.75", touched)
+
+            if designators or hide:
+                for desig, elems in self._comp_elems.items():
+                    for elem in elems:
+                        if desig in hide:
+                            self._override(elem, "opacity", "0", touched)
+                        elif desig in designators:
+                            self._recolor(elem, SELECT_HIGHLIGHT_COLOR, touched)
+                        else:
+                            self._override(elem, "opacity", "0.20", touched)
             return ET.tostring(self._root, encoding="unicode", xml_declaration=False)
         finally:
             for elem, attr, old in touched:
@@ -334,8 +343,11 @@ class PcbModel:
 
     def _build_bom(self) -> None:
         doc = self._pcbdoc
-        groups: dict[str, list[str]] = {}
-        descriptions: dict[str, str] = {}
+        groups: dict[tuple, list[str]] = {}
+        comments: dict[tuple, str] = {}
+        descriptions: dict[tuple, str] = {}
+        part_numbers: dict[tuple, str] = {}
+        extra_texts: dict[tuple, set[str]] = defaultdict(set)
         comp_layers: dict[str, str] = {}
 
         for comp in doc.components:
@@ -346,32 +358,48 @@ class PcbModel:
                     continue
 
             params = comp.parameters or {}
-            comment = str(
-                params.get("Comment")
-                or params.get("Value")
-                or params.get("Manufacturer Part Number")
-                or params.get("Manufacturer_Part_Number")
-                or params.get("MP")
-                or params.get("Design Item ID")
-                or getattr(comp, "description", None)
-                or ""
-            ).strip()
-            if not comment:
-                comment = "(No Comment)"
+            pn = _extract_part_number(params, comp)
+            comment_val = str(params.get("Comment") or params.get("Value") or "").strip()
+            footprint_val = str(getattr(comp, "footprint", "") or "").strip()
 
-            groups.setdefault(comment, []).append(comp.designator)
-            if comment not in descriptions:
-                descriptions[comment] = str(getattr(comp, "description", "") or "").strip()
+            # Group key uniquely identifies parts by Part Number/MPN (if present), or Comment + Footprint
+            if pn:
+                group_key = ("pn", pn, footprint_val)
+            elif comment_val:
+                group_key = ("comment", comment_val, footprint_val)
+            else:
+                group_key = ("desig", comp.designator, footprint_val)
+
+            groups.setdefault(group_key, []).append(comp.designator)
+
+            if group_key not in comments:
+                comments[group_key] = comment_val or pn or "(No Comment)"
+            if group_key not in descriptions:
+                descriptions[group_key] = str(getattr(comp, "description", "") or "").strip()
+            if group_key not in part_numbers:
+                part_numbers[group_key] = pn
+
+            for k, v in params.items():
+                if v and str(v).strip():
+                    extra_texts[group_key].add(str(v).strip())
+            for attr in ("part_number", "mpn", "item_id", "design_item_id", "library_ref", "component_name", "comment"):
+                val = getattr(comp, attr, None)
+                if val and str(val).strip():
+                    extra_texts[group_key].add(str(val).strip())
+
             comp_layers[comp.designator] = str(getattr(comp, "layer", "TOP") or "TOP").upper()
 
         bom: list[BomEntry] = []
-        for comment, designators in groups.items():
+        for group_key, designators in groups.items():
             designators.sort(key=_natural_key)
+            extra_str = " ".join(sorted(extra_texts.get(group_key, set())))
             bom.append(BomEntry(
-                comment=comment,
+                comment=comments.get(group_key, "(No Comment)"),
                 quantity=len(designators),
                 designators=designators,
-                description=descriptions.get(comment, ""),
+                description=descriptions.get(group_key, ""),
+                part_number=part_numbers.get(group_key, ""),
+                extra_text=extra_str,
                 designator_layers={d: comp_layers[d] for d in designators},
                 top_refs=[d for d in designators if "BOTTOM" not in comp_layers[d]],
                 bot_refs=[d for d in designators if "BOTTOM" in comp_layers[d]],
@@ -495,19 +523,23 @@ def _strip_non_assembly_elements(root: ET.Element) -> None:
     - Via drill holes (data-hole-owner="via")
     - Copper tracks, fills, and via rings (data-net-index present, no data-component)
     - Mechanical footprint elements such as courtyard (data-layer-role="mechanical" with data-component)
-    - Silkscreen designator text strokes (data-primitive="text")
+    - Silkscreen elements are tagged with class="silkscreen-element" (hidden by default)
     """
-    for parent in root.iter():
+    for parent in list(root.iter()):
         to_remove = []
         for child in parent:
             net_index = child.get("data-net-index")
             component = child.get("data-component")
-            if (
+            if child.get("data-layer-role") == "silkscreen":
+                cls = child.get("class", "")
+                if "silkscreen-element" not in cls:
+                    child.set("class", f"silkscreen-element {cls}".strip())
+                    child.set("display", "none")
+            elif (
                 child.get("data-hole-owner") == "via"
                 or (net_index is not None and component is None)
                 or (child.get("data-layer-role") == "mechanical" and component is not None)
                 or child.get("data-primitive") == "text"
-                or child.get("data-layer-role") == "silkscreen"
             ):
                 to_remove.append(child)
         for child in to_remove:
@@ -721,8 +753,12 @@ def _compute_bounds(
     return desig_bounds, instance_bounds
 
 
-def parse_prjpcb_dnp(path: Path) -> frozenset[str]:
-    """Parse a .PrjPcb file and return designators marked Kind=1 (Not Fitted) in the active variant."""
+def parse_prjpcb_variants(path: Path | str) -> tuple[str, dict[str, frozenset[str]]]:
+    """Parse a .PrjPcb file and return (default_variant_name, variants_dict).
+
+    variants_dict maps variant description/name to its frozenset of DNP (Kind=1) designators.
+    Always includes '[No Variations]' with an empty DNP set.
+    """
     text = Path(path).read_text(encoding="utf-8", errors="replace")
     lines = text.splitlines()
 
@@ -733,16 +769,17 @@ def parse_prjpcb_dnp(path: Path) -> frozenset[str]:
             current_variant = s.split("=", 1)[1].strip()
             break
 
-    dnp: set[str] = set()
+    variants: dict[str, set[str]] = {"[No Variations]": set()}
     in_project_variant = False
     section_desc = ""
     section_variations: list[tuple[str, str]] = []
 
     def _flush() -> None:
-        if section_desc == current_variant:
+        if section_desc:
+            dnp_set = variants.setdefault(section_desc, set())
             for desig, kind in section_variations:
                 if kind == "1":
-                    dnp.add(desig)
+                    dnp_set.add(desig)
 
     for line in lines:
         s = line.strip()
@@ -768,4 +805,90 @@ def parse_prjpcb_dnp(path: Path) -> frozenset[str]:
     if in_project_variant:
         _flush()
 
-    return frozenset(dnp)
+    frozen_variants = {k: frozenset(v) for k, v in variants.items()}
+    default_name = current_variant if current_variant in frozen_variants else "[No Variations]"
+    return default_name, frozen_variants
+
+
+def parse_prjpcb_dnp(path: Path | str) -> frozenset[str]:
+    """Parse a .PrjPcb file and return designators marked Kind=1 (Not Fitted) in the active variant."""
+    default_name, variants = parse_prjpcb_variants(path)
+    return variants.get(default_name, frozenset())
+
+
+def _extract_serial_number(params: dict, comp: object) -> str:
+    """Extract serial number from Altium component parameters."""
+    sn_keys = (
+        "Serial Number", "Serial_Number", "SerialNumber", "Serial No", "Serial_No", "Serial#",
+        "S/N", "SN", "Serial"
+    )
+    for key in sn_keys:
+        val = params.get(key)
+        if val and str(val).strip():
+            return str(val).strip()
+
+    lower_sn = {k.lower() for k in sn_keys}
+    for k, v in params.items():
+        if k.lower() in lower_sn:
+            if v and str(v).strip():
+                return str(v).strip()
+
+    for attr in ("serial_number", "sn", "serial"):
+        val = getattr(comp, attr, None)
+        if val and str(val).strip():
+            return str(val).strip()
+
+    return ""
+
+
+def _extract_part_number(params: dict, comp: object) -> str:
+    """Extract serial number / MPN / part number from Altium component properties."""
+    # Priority 1: Explicit Serial Number
+    sn = _extract_serial_number(params, comp)
+    if sn:
+        return sn
+
+    # Priority 2: MPN / Manufacturer Part Number
+    mpn_keys = (
+        "MPN", "Manufacturer Part Number", "Manufacturer_Part_Number",
+        "Manufacturer Part #", "Mfg Part Number", "MP"
+    )
+    for key in mpn_keys:
+        val = params.get(key)
+        if val and str(val).strip():
+            return str(val).strip()
+
+    lower_mpn = {k.lower() for k in mpn_keys}
+    for k, v in params.items():
+        if k.lower() in lower_mpn:
+            if v and str(v).strip():
+                return str(v).strip()
+
+    # Priority 3: Supplier Part Number / P/N / Part Number / SKU
+    pn_keys = (
+        "Supplier Part Number 1", "Supplier Part Number", "Order Code", "SKU",
+        "P/N", "PN", "Part Number", "Part_Number", "PartNumber", "Part #", "Part#", "Part No", "Part_No"
+    )
+    for key in pn_keys:
+        val = params.get(key)
+        if val and str(val).strip():
+            return str(val).strip()
+
+    lower_pn = {k.lower() for k in pn_keys}
+    for k, v in params.items():
+        if k.lower() in lower_pn:
+            if v and str(v).strip():
+                return str(v).strip()
+
+    # Priority 4: Design Item ID / Library Ref / Attributes
+    for key in ("Design Item ID", "Component Name", "Library Ref", "LibRef", "Device"):
+        val = params.get(key)
+        if val and str(val).strip():
+            return str(val).strip()
+
+    for attr in ("mpn", "serial_number", "sn", "part_number", "item_id", "design_item_id", "library_ref", "component_name"):
+        val = getattr(comp, attr, None)
+        if val and str(val).strip():
+            return str(val).strip()
+
+    return ""
