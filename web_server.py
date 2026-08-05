@@ -10,8 +10,9 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from pcb_model import PcbModel, parse_prjpcb_dnp
+from pcb_model import PcbModel, parse_prjpcb_dnp, parse_prjpcb_variants
 from population_state import PopulationState
+from app_paths import app_dir
 
 
 class WebServer:
@@ -20,6 +21,8 @@ class WebServer:
         self._model: PcbModel | None = None
         self._placement = PopulationState()
         self._dnp: frozenset[str] = frozenset()
+        self._variants: dict[str, frozenset[str]] = {"[No Variations]": frozenset()}
+        self._active_variant: str = "[No Variations]"
         self._lock = threading.Lock()
         self._state_path: Path | None = None
         self._app = self._build_app()
@@ -29,12 +32,16 @@ class WebServer:
     def load(self, pcb_path: Path, prj_path: Path | None = None) -> str:
         """Load PCB (and optionally .PrjPcb). Returns board name."""
         model = PcbModel.load(pcb_path)
-        dnp: frozenset[str] = frozenset()
+        variants: dict[str, frozenset[str]] = {"[No Variations]": frozenset()}
+        default_var = "[No Variations]"
         if prj_path:
-            dnp = parse_prjpcb_dnp(prj_path)
+            default_var, variants = parse_prjpcb_variants(prj_path)
+        dnp = variants.get(default_var, frozenset())
         state_path = pcb_path.with_suffix(".popstate.json")
         with self._lock:
             self._model = model
+            self._variants = variants
+            self._active_variant = default_var
             self._dnp = dnp
             self._placement.clear()
             self._state_path = state_path
@@ -63,6 +70,8 @@ class WebServer:
             "index": idx,
             "comment": entry.comment,
             "description": entry.description,
+            "part_number": entry.part_number,
+            "extra_text": getattr(entry, "extra_text", ""),
             "quantity": len(visible),
             "designators": visible,
             "top_refs": top_refs,
@@ -75,7 +84,7 @@ class WebServer:
         }
 
     def _build_app(self) -> Flask:
-        web_dir = Path(__file__).parent / "web"
+        web_dir = app_dir() / "web"
         # static_folder/static_url_path tell Flask to serve web/ at /static/
         app = Flask(__name__, static_folder=str(web_dir), static_url_path="/static")
 
@@ -85,7 +94,7 @@ class WebServer:
 
         @app.route("/favicon.svg")
         def favicon():
-            return send_from_directory(str(Path(__file__).parent / "assets"), "icon.svg")
+            return send_from_directory(str(app_dir() / "assets"), "icon.svg")
 
         @app.route("/api/data")
         def api_data():
@@ -104,12 +113,34 @@ class WebServer:
                     "bounds": bounds,
                     "placed": list(placed),
                     "dnp": list(dnp),
+                    "variants": list(self._variants.keys()),
+                    "active_variant": self._active_variant,
                     "viewbox": list(model.viewbox),
                     # Designators hidden when viewing each side
                     "hidden": {
                         "TOP": sorted(model.hidden_designators_for_side("TOP")),
                         "BOTTOM": sorted(model.hidden_designators_for_side("BOTTOM")),
                     },
+                })
+
+        @app.route("/api/set_variant", methods=["POST"])
+        def api_set_variant():
+            var_name = (request.json or {}).get("variant", "")
+            with self._lock:
+                if var_name in self._variants:
+                    self._active_variant = var_name
+                    self._dnp = self._variants[var_name]
+                model = self._model
+                if model is None:
+                    return jsonify({"ok": False})
+                placed = self._placement.placed
+                dnp = self._dnp
+                bom = [self._bom_row_dict(i, e, placed, dnp) for i, e in enumerate(model.bom)]
+                return jsonify({
+                    "ok": True,
+                    "active_variant": self._active_variant,
+                    "dnp": list(dnp),
+                    "bom": bom,
                 })
 
         @app.route("/api/svg")

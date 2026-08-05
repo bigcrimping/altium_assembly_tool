@@ -1,6 +1,27 @@
 # Virtual environment
 .venv/
+venv/
 
 # Python bytecode cache
 __pycache__/
 *.py[cod]
+
+# PyInstaller build artifacts
+build/
+dist/
+
+# Altium CAD files & save states
+*.PcbDoc
+*.PrjPcb
+*.PcbLib
+*.SchDoc
+*.popstate.json
+
+# Local test folders & shortcuts
+local_data/
+test_boards/
+*.lnk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
