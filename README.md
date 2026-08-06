@@ -316,3 +316,19 @@ python main.py "C:\path\to\your\board.PcbDoc"
 ```
 
 ---
+
+## Building Portable Executable (.exe)
+
+To build a standalone portable Windows folder (no Python required on target PCs):
+
+1. Install PyInstaller:
+   ```powershell
+   pip install pyinstaller
+   ```
+
+2. Run the spec build:
+   ```powershell
+   pyinstaller altium_assembly_tool.spec --noconfirm
+   ```
+
+The standalone folder will be generated in `dist/AltiumAssemblyTool/`. Copy this folder to a flash drive or distribute it to end users.

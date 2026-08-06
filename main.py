@@ -3,6 +3,7 @@ main.py — Altium Assembly Tool: 2D PCB BOM viewer.
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QButtonGroup,
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -42,11 +44,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from pcb_model import BomEntry, PcbModel, parse_prjpcb_dnp
+from pcb_model import BomEntry, PcbModel, parse_prjpcb_dnp, parse_prjpcb_variants
 from pcb_viewer import PcbViewer
 from population_state import PopulationState
+from app_paths import app_dir
 
-ICON_PATH = Path(__file__).parent / "assets" / "icon.svg"
+ICON_PATH = app_dir() / "assets" / "icon.svg"
 
 
 class PcbLoadWorker(QThread):
@@ -93,28 +96,62 @@ def _apply_row_colors(
     cell_brush = QBrush(_COLOR_PLACED_CELL)
     none_brush = QBrush()
     if all_done:
-        for col in range(7):
+        for col in range(8):
             item = table.item(row, col)
             if item:
                 item.setBackground(row_brush)
     else:
-        for col in range(5):
+        for col in range(6):
             item = table.item(row, col)
             if item:
                 item.setBackground(none_brush)
-        item5 = table.item(row, 5)
         item6 = table.item(row, 6)
-        if item5:
-            item5.setBackground(cell_brush if top_done else none_brush)
+        item7 = table.item(row, 7)
         if item6:
-            item6.setBackground(cell_brush if bot_done else none_brush)
+            item6.setBackground(cell_brush if top_done else none_brush)
+        if item7:
+            item7.setBackground(cell_brush if bot_done else none_brush)
 
 
-def _entry_matches(entry: BomEntry, query: str) -> bool:
-    """Case-insensitive substring match against name, description, or any designator."""
-    if query in entry.comment.lower() or query in entry.description.lower():
+def _normalize_text(text: str) -> str:
+    """Strip all non-alphanumeric characters and convert to lowercase."""
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def _entry_matches(entry: BomEntry, query: str,
+                    search_sn: bool = True,
+                    search_refs: bool = True) -> bool:
+    """Multi-term, case-insensitive, punctuation-flexible search.
+
+    Searches name (comment), and optionally part_number/extra_text and
+    designators.  Fields are checked one-by-one so that normalized substring
+    matches cannot span across field boundaries.
+    """
+    if not query or not query.strip():
         return True
-    return any(query in d.lower() for d in entry.designators)
+
+    fields: list[str] = [entry.comment]
+    if search_sn:
+        fields.extend([entry.part_number, getattr(entry, "extra_text", "")])
+    if search_refs:
+        fields.extend(entry.designators)
+
+    terms = query.lower().split()
+    for term in terms:
+        norm_term = _normalize_text(term)
+        found = False
+        for field in fields:
+            low = field.lower()
+            if term in low:
+                found = True
+                break
+            if norm_term and norm_term in _normalize_text(field):
+                found = True
+                break
+        if not found:
+            return False
+
+    return True
 
 
 def _refs_html(refs: list[str], placed: frozenset[str], dnp: frozenset[str] = frozenset()) -> str:
@@ -277,6 +314,7 @@ class MainWindow(QMainWindow):
         self._progress_dlg: QProgressDialog | None = None
         self._placement = PopulationState()
         self._dnp: frozenset[str] = frozenset()
+        self._variants: dict[str, frozenset[str]] = {"[No Variations]": frozenset()}
         self._undo: list[str] = []
         self._redo: list[str] = []
         self._settings = QSettings("altium_assembly_tool", "Altium Assembly Tool")
@@ -306,6 +344,10 @@ class MainWindow(QMainWindow):
         self._btn_open.setMenu(self._recent_menu)
         self._rebuild_recent_menu()
         self._btn_load_prjpcb = QPushButton("Load .PrjPcb")
+        self._combo_variant = QComboBox()
+        self._combo_variant.addItem("[No Variations]")
+        self._combo_variant.setEnabled(False)
+        self._combo_variant.setToolTip("Select PCB assembly variant defined in .PrjPcb")
         self._lbl_filename = QLabel("No file loaded")
         self._lbl_filename.setMinimumWidth(220)
 
@@ -328,6 +370,11 @@ class MainWindow(QMainWindow):
         self._btn_labels.setChecked(True)
         self._btn_labels.setStyleSheet(_SIDE_BTN_STYLE)
         self._btn_labels.setToolTip("Show designator labels on the selected row's components")
+
+        self._btn_silkscreen = QPushButton("Silkscreen")
+        self._btn_silkscreen.setCheckable(True)
+        self._btn_silkscreen.setStyleSheet(_SIDE_BTN_STYLE)
+        self._btn_silkscreen.setToolTip("Show/hide silkscreen layer outlines and text overlay")
 
         self._btn_clear = QPushButton("Clear Selection")
 
@@ -374,7 +421,7 @@ class MainWindow(QMainWindow):
             )
             flow.addWidget(lbl)
 
-        for w in (self._btn_open, self._btn_load_prjpcb, self._lbl_filename):
+        for w in (self._btn_open, self._btn_load_prjpcb, self._combo_variant, self._lbl_filename):
             flow.addWidget(w)
 
         _section("Steps")
@@ -383,7 +430,7 @@ class MainWindow(QMainWindow):
 
         _section("View")
         for w in (self._btn_fit, self._btn_fit_sel, self._btn_auto_zoom, self._btn_labels,
-                  self._btn_clear, self._btn_dnp_view):
+                  self._btn_silkscreen, self._btn_clear, self._btn_dnp_view):
             flow.addWidget(w)
 
         _section("Config")
@@ -433,16 +480,36 @@ class MainWindow(QMainWindow):
         )
         bom_header.addWidget(self._btn_hide_fitted)
         self._search_box = QLineEdit()
-        self._search_box.setPlaceholderText("Filter by designator or name…")
+        self._search_box.setPlaceholderText("Filter by designator, name, or serial number…")
         self._search_box.setClearButtonEnabled(True)
-        self._search_box.setMaximumWidth(260)
+        self._search_box.setMaximumWidth(280)
         bom_header.addWidget(self._search_box)
+        self._btn_search_sn = QPushButton("Include SN")
+        self._btn_search_sn.setCheckable(True)
+        self._btn_search_sn.setChecked(True)
+        self._btn_search_sn.setMinimumWidth(90)
+        self._btn_search_sn.setStyleSheet(_SIDE_BTN_STYLE)
+        self._btn_search_sn.setToolTip(
+            "When checked, search includes Part/Serial Numbers (MPN, SKU). "
+            "When unchecked, search matches Component Values & Designators only (e.g. 1R)."
+        )
+        bom_header.addWidget(self._btn_search_sn)
+        self._btn_search_refs = QPushButton("Include Refs")
+        self._btn_search_refs.setCheckable(True)
+        self._btn_search_refs.setChecked(True)
+        self._btn_search_refs.setMinimumWidth(100)
+        self._btn_search_refs.setStyleSheet(_SIDE_BTN_STYLE)
+        self._btn_search_refs.setToolTip(
+            "When checked, search includes component designators (R1, C3, U5…). "
+            "Uncheck to search only by component value/name."
+        )
+        bom_header.addWidget(self._btn_search_refs)
         bom_header.addStretch(1)
         bottom_layout.addLayout(bom_header)
 
-        self._bom_table = QTableWidget(0, 7)
+        self._bom_table = QTableWidget(0, 8)
         self._bom_table.setHorizontalHeaderLabels(
-            ["#", "QTY", "Placed", "To Place", "Name", "Top Refs", "Bottom Refs"]
+            ["#", "QTY", "Placed", "To Place", "Name", "Serial Number", "Top Refs", "Bottom Refs"]
         )
         hdr = self._bom_table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -456,8 +523,8 @@ class MainWindow(QMainWindow):
         self._bom_table.setAlternatingRowColors(True)
         self._bom_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         _html_delegate = _HtmlDelegate(self._bom_table)
-        self._bom_table.setItemDelegateForColumn(5, _html_delegate)
         self._bom_table.setItemDelegateForColumn(6, _html_delegate)
+        self._bom_table.setItemDelegateForColumn(7, _html_delegate)
         bottom_layout.addWidget(self._bom_table)
 
         splitter.addWidget(self._viewer)
@@ -490,6 +557,10 @@ class MainWindow(QMainWindow):
         self._btn_bottom_view.clicked.connect(self._on_view_bottom)
         self._btn_hide_fitted.toggled.connect(self._apply_row_filters)
         self._search_box.textChanged.connect(self._apply_row_filters)
+        self._btn_search_sn.toggled.connect(self._apply_row_filters)
+        self._btn_search_refs.toggled.connect(self._apply_row_filters)
+        self._btn_silkscreen.toggled.connect(lambda _checked: self._update_viewer())
+        self._combo_variant.currentTextChanged.connect(self._on_variant_changed)
         self._bom_table.currentCellChanged.connect(
             lambda row, *_: self._on_bom_row_changed(row)
         )
@@ -509,6 +580,33 @@ class MainWindow(QMainWindow):
         if path:
             self._load_file(Path(path))
 
+    def _apply_prjpcb_variants(self, path: Path) -> str:
+        default_name, variants = parse_prjpcb_variants(path)
+        self._variants = variants
+        self._combo_variant.blockSignals(True)
+        self._combo_variant.clear()
+        for name in variants.keys():
+            self._combo_variant.addItem(name)
+        idx = self._combo_variant.findText(default_name)
+        if idx >= 0:
+            self._combo_variant.setCurrentIndex(idx)
+        self._combo_variant.setEnabled(len(variants) > 1)
+        self._combo_variant.blockSignals(False)
+
+        selected = self._combo_variant.currentText() or default_name
+        self._dnp = variants.get(selected, frozenset())
+        return selected
+
+    def _on_variant_changed(self, variant_name: str) -> None:
+        if not variant_name or self._model is None:
+            return
+        self._dnp = self._variants.get(variant_name, frozenset())
+        self._update_viewer()
+        self._update_bom_colors()
+        self.statusBar().showMessage(
+            f"Variant: {variant_name}  |  {len(self._dnp)} DNP component(s)"
+        )
+
     def _on_load_prjpcb(self) -> None:
         default_dir = ""
         if self._model and self._model.filepath:
@@ -522,11 +620,11 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            self._dnp = parse_prjpcb_dnp(Path(path))
+            selected_var = self._apply_prjpcb_variants(Path(path))
             self._update_viewer()
             self._update_bom_colors()
             self.statusBar().showMessage(
-                f"Loaded {Path(path).name}  |  {len(self._dnp)} DNP component(s)"
+                f"Loaded {Path(path).name} (Variant: {selected_var})  |  {len(self._dnp)} DNP component(s)"
             )
         except Exception as exc:
             self._show_error("PrjPcb Load Error", f"Failed to parse file:\n{exc}")
@@ -626,8 +724,8 @@ class MainWindow(QMainWindow):
             prjs = []
         if len(prjs) == 1:  # only auto-load when unambiguous
             try:
-                self._dnp = parse_prjpcb_dnp(prjs[0])
-                notes.append(f"DNP from {prjs[0].name}")
+                selected_var = self._apply_prjpcb_variants(prjs[0])
+                notes.append(f"DNP ({selected_var}) from {prjs[0].name}")
             except Exception:
                 pass
         state_path = model.filepath.with_suffix(".popstate.json")
@@ -997,7 +1095,7 @@ class MainWindow(QMainWindow):
         self._bom_table.scrollToItem(item)
         brush = QBrush(QColor(255, 200, 0, 130))
         self._bom_table.blockSignals(True)
-        for col in range(7):
+        for col in range(8):
             it = self._bom_table.item(row, col)
             if it:
                 it.setBackground(brush)
@@ -1063,10 +1161,11 @@ class MainWindow(QMainWindow):
             return
         hide = self._model.hidden_designators_for_side(self._view_side)
         visible = self._active_designators()
+        show_silk = self._btn_silkscreen.isChecked() if hasattr(self, "_btn_silkscreen") else False
         if visible is not None:
-            svg = self._model.svg_for_designators(set(visible), hide or None)
+            svg = self._model.svg_for_designators(set(visible), hide or None, show_silkscreen=show_silk)
         else:
-            svg = self._model.side_filtered_svg(self._view_side)
+            svg = self._model.svg_for_designators(set(), hide or None, show_silkscreen=show_silk)
         placed = self._placed_visible()
         if placed:
             svg = self._model.add_placed_markers(svg, placed)
@@ -1099,9 +1198,10 @@ class MainWindow(QMainWindow):
         self._bom_table.setColumnWidth(1, int(w * 0.05))  # QTY
         self._bom_table.setColumnWidth(2, int(w * 0.05))  # Placed
         self._bom_table.setColumnWidth(3, int(w * 0.06))  # To Place
-        self._bom_table.setColumnWidth(4, int(w * 0.23))  # Name
-        self._bom_table.setColumnWidth(5, int(w * 0.29))  # Top Refs
-        # column 6 (Bottom Refs) fills the remainder via setStretchLastSection(True)
+        self._bom_table.setColumnWidth(4, int(w * 0.18))  # Name
+        self._bom_table.setColumnWidth(5, int(w * 0.18))  # Part Number
+        self._bom_table.setColumnWidth(6, int(w * 0.23))  # Top Refs
+        # column 7 (Bottom Refs) fills the remainder via setStretchLastSection(True)
 
     def _populate_bom_table(self, active: list[tuple[BomEntry, list[str]]]) -> None:
         placed = self._placement.placed
@@ -1124,8 +1224,12 @@ class MainWindow(QMainWindow):
             if entry.description:
                 name_item.setToolTip(entry.description)
             self._bom_table.setItem(row, 4, name_item)
-            self._bom_table.setItem(row, 5, QTableWidgetItem(_refs_html(entry.top_refs, placed, dnp)))
-            self._bom_table.setItem(row, 6, QTableWidgetItem(_refs_html(entry.bot_refs, placed, dnp)))
+            pn_item = QTableWidgetItem(entry.part_number)
+            if entry.description:
+                pn_item.setToolTip(entry.description)
+            self._bom_table.setItem(row, 5, pn_item)
+            self._bom_table.setItem(row, 6, QTableWidgetItem(_refs_html(entry.top_refs, placed, dnp)))
+            self._bom_table.setItem(row, 7, QTableWidgetItem(_refs_html(entry.bot_refs, placed, dnp)))
             _apply_row_colors(self._bom_table, row, entry.top_refs, entry.bot_refs, visible, placed, dnp)
         self._bom_table.blockSignals(False)
         self._apply_default_column_widths()
@@ -1145,8 +1249,8 @@ class MainWindow(QMainWindow):
             placed_item.setText(str(placed_count))
         if to_place_item:
             to_place_item.setText(str(len(visible) - placed_count))
-        top_item = self._bom_table.item(row, 5)
-        bot_item = self._bom_table.item(row, 6)
+        top_item = self._bom_table.item(row, 6)
+        bot_item = self._bom_table.item(row, 7)
         if top_item:
             top_item.setText(_refs_html(entry.top_refs, placed, dnp))
         if bot_item:
@@ -1186,9 +1290,13 @@ class MainWindow(QMainWindow):
         """Hide BOM rows per the 'Hide Fitted' toggle and the search box."""
         hide_fitted = self._btn_hide_fitted.isChecked()
         query = self._search_box.text().strip().lower()
+        search_sn = self._btn_search_sn.isChecked()
+        search_refs = self._btn_search_refs.isChecked()
         for row, (entry, visible) in enumerate(self._active_bom):
             hidden = (hide_fitted and self._row_is_complete(visible)) or (
-                bool(query) and not _entry_matches(entry, query)
+                bool(query) and not _entry_matches(entry, query,
+                                                    search_sn=search_sn,
+                                                    search_refs=search_refs)
             )
             self._bom_table.setRowHidden(row, hidden)
 

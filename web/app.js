@@ -15,6 +15,9 @@ const state = {
   autoZoom: false,
   labels: true,
   dnpView: false,   // show every DNP part board-wide instead of a single BOM row
+  searchSn: true,   // include Part/Serial numbers in search
+  searchRefs: true, // include component designators in search
+  silkscreenView: false, // show silkscreen layer outlines/text
 };
 
 // Designators currently highlighted on the board: every DNP part when the DNP
@@ -54,7 +57,7 @@ const loadError      = document.getElementById('load-error');
 const pcbPathInput   = document.getElementById('pcb-path');
 const prjPathInput   = document.getElementById('prj-path');
 const searchInput    = document.getElementById('bom-search');
-const progressLabel  = document.getElementById('progress-label');
+const variantSelect  = document.getElementById('variant-select');
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -95,6 +98,22 @@ function applyData(data) {
   undoStack.length = 0;
   redoStack.length = 0;
   boardNameEl.textContent = data.board_name;
+
+  if (data.variants && data.variants.length > 0) {
+    variantSelect.innerHTML = '';
+    data.variants.forEach(v => {
+      const opt = document.createElement('option');
+      opt.value = v;
+      opt.textContent = v;
+      if (v === data.active_variant) opt.selected = true;
+      variantSelect.appendChild(opt);
+    });
+    variantSelect.disabled = data.variants.length <= 1;
+  } else {
+    variantSelect.innerHTML = '<option>[No Variations]</option>';
+    variantSelect.disabled = true;
+  }
+
   renderBomTable();
   enableControls(true);
   setDnpButton();
@@ -190,11 +209,15 @@ function renderRecents() {
 
 // ── Controls ──────────────────────────────────────────────────────────────────
 function enableControls(on) {
-  ['btn-prev','btn-next','btn-fit','btn-fit-sel','btn-auto-zoom','btn-labels',
-   'btn-clear','btn-dnp','btn-top','btn-bot','btn-hide-fitted','bom-search'].forEach(id => {
-    document.getElementById(id).disabled = !on;
+  ['btn-prev','btn-next','btn-fit','btn-fit-sel','btn-auto-zoom','btn-labels','btn-silkscreen',
+   'btn-clear','btn-dnp','btn-top','btn-bot','btn-hide-fitted','bom-search','btn-search-sn','btn-search-refs'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !on;
   });
   document.getElementById('btn-labels').classList.toggle('active-side', state.labels);
+  document.getElementById('btn-search-sn').classList.toggle('active-side', state.searchSn);
+  document.getElementById('btn-search-refs').classList.toggle('active-side', state.searchRefs);
+  document.getElementById('btn-silkscreen').classList.toggle('active-side', state.silkscreenView);
 }
 
 document.getElementById('btn-fit').addEventListener('click', fitView);
@@ -221,6 +244,24 @@ document.getElementById('btn-labels').addEventListener('click', () => {
   updateLabels();
 });
 
+document.getElementById('btn-silkscreen').addEventListener('click', () => {
+  state.silkscreenView = !state.silkscreenView;
+  document.getElementById('btn-silkscreen').classList.toggle('active-side', state.silkscreenView);
+  document.body.classList.toggle('show-silkscreen', state.silkscreenView);
+});
+
+document.getElementById('btn-search-sn').addEventListener('click', () => {
+  state.searchSn = !state.searchSn;
+  document.getElementById('btn-search-sn').classList.toggle('active-side', state.searchSn);
+  applyRowFilters();
+});
+
+document.getElementById('btn-search-refs').addEventListener('click', () => {
+  state.searchRefs = !state.searchRefs;
+  document.getElementById('btn-search-refs').classList.toggle('active-side', state.searchRefs);
+  applyRowFilters();
+});
+
 document.getElementById('btn-hide-fitted').addEventListener('click', () => {
   state.hideFitted = !state.hideFitted;
   document.getElementById('btn-hide-fitted').classList.toggle('active-side', state.hideFitted);
@@ -228,6 +269,29 @@ document.getElementById('btn-hide-fitted').addEventListener('click', () => {
 });
 
 document.getElementById('btn-dnp').addEventListener('click', toggleDnpView);
+
+variantSelect.addEventListener('change', async () => {
+  const varName = variantSelect.value;
+  if (!varName) return;
+  try {
+    const resp = await fetchJson('/api/set_variant', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ variant: varName }),
+    });
+    if (resp.ok) {
+      state.dnp = new Set(resp.dnp);
+      state.bom = resp.bom;
+      renderBomTable();
+      refreshBoard();
+      updateProgress();
+      applyRowFilters();
+      setStatus(`Variant: ${resp.active_variant}  |  ${state.dnp.size} DNP part(s)`);
+    }
+  } catch (e) {
+    setStatus('Variant change error: ' + e.message);
+  }
+});
 
 function setDnpButton() {
   document.getElementById('btn-dnp').classList.toggle('active-side', state.dnpView);
@@ -332,6 +396,7 @@ function buildBomRow(row, idx) {
     { text: row.placed_count,   center: true, id: 'placed' },
     { text: row.to_place_count, center: true, id: 'toplace' },
     { text: row.comment,        tooltip: row.description },
+    { text: row.part_number || '', tooltip: row.description },
     { html: refsHtml(row.top_refs), id: 'toprefs',
       sideDone: row.top_done && !row.all_done },
     { html: refsHtml(row.bot_refs), id: 'botrefs',
@@ -358,21 +423,43 @@ function updateBomRow(rowData) {
   if (!tr) return;
   tr.children[2].textContent = rowData.placed_count;
   tr.children[3].textContent = rowData.to_place_count;
-  tr.children[5].innerHTML   = refsHtml(rowData.top_refs);
-  tr.children[6].innerHTML   = refsHtml(rowData.bot_refs);
+  tr.children[6].innerHTML   = refsHtml(rowData.top_refs);
+  tr.children[7].innerHTML   = refsHtml(rowData.bot_refs);
   tr.classList.toggle('row-all-done', rowData.all_done);
-  tr.children[5].classList.toggle('cell-side-done', rowData.top_done && !rowData.all_done);
-  tr.children[6].classList.toggle('cell-side-done', rowData.bot_done && !rowData.all_done);
+  tr.children[6].classList.toggle('cell-side-done', rowData.top_done && !rowData.all_done);
+  tr.children[7].classList.toggle('cell-side-done', rowData.bot_done && !rowData.all_done);
   // Refresh row-all-done cell backgrounds (the CSS rule targets td via row class)
   if (rowData.all_done) {
-    [5, 6].forEach(i => tr.children[i].classList.remove('cell-side-done'));
+    [6, 7].forEach(i => tr.children[i].classList.remove('cell-side-done'));
   }
 }
 
 function rowMatchesQuery(row, q) {
-  if (row.comment.toLowerCase().includes(q)) return true;
-  if ((row.description || '').toLowerCase().includes(q)) return true;
-  return row.designators.some(d => d.toLowerCase().includes(q));
+  if (!q) return true;
+  // Build list of individual fields to check against.
+  // Checking per-field prevents cross-boundary false matches
+  // (e.g. R1+R2 normalized to "r1r2" falsely matching "1r").
+  const fields = [
+    row.comment || '',
+  ];
+  if (state.searchSn) {
+    fields.push(row.part_number || '', row.extra_text || '');
+  }
+  if (state.searchRefs) {
+    (row.designators || []).forEach(d => fields.push(d));
+  }
+
+  const terms = q.toLowerCase().split(/\s+/);
+  return terms.every(term => {
+    if (!term) return true;
+    const normTerm = term.replace(/[^a-z0-9]/g, '');
+    return fields.some(f => {
+      const low = f.toLowerCase();
+      if (low.includes(term)) return true;
+      if (normTerm && f.replace(/[^a-zA-Z0-9]/g, '').toLowerCase().includes(normTerm)) return true;
+      return false;
+    });
+  });
 }
 
 function applyRowFilters() {
