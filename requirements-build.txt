@@ -1,0 +1,9 @@
+# Build-only dependencies (for producing the standalone Windows folder).
+# Installing this file also installs the runtime dependencies.
+#
+#   pip install -r requirements-build.txt
+#   pyinstaller altium_assembly_tool.spec --noconfirm
+
+-r requirements.txt
+
+pyinstaller==6.22.3
