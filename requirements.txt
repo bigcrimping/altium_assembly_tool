@@ -1,3 +1,7 @@
 PySide6>=6.5
 flask>=3.0
-altium-monkey @ git+https://github.com/wavenumber-eng/altium_monkey.git
+# Pinned to a specific commit so every machine builds the version the release
+# was tested against. An unpinned git URL resolves to whatever HEAD happens to
+# be, which is how a build that works on one machine breaks on another.
+# To move to a newer altium-monkey, bump this commit and re-test the build.
+altium-monkey @ git+https://github.com/wavenumber-eng/altium_monkey.git@3a648070014155d4429749076a2fc001bd638524

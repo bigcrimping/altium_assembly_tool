@@ -321,9 +321,9 @@ python main.py "C:\path\to\your\board.PcbDoc"
 
 To build a standalone portable Windows folder (no Python required on target PCs):
 
-1. Install PyInstaller:
+1. Install the build dependencies (this also installs the runtime ones):
    ```powershell
-   pip install pyinstaller
+   pip install -r requirements-build.txt
    ```
 
 2. Run the spec build:
@@ -332,3 +332,23 @@ To build a standalone portable Windows folder (no Python required on target PCs)
    ```
 
 The standalone folder will be generated in `dist/AltiumAssemblyTool/`. Copy this folder to a flash drive or distribute it to end users.
+
+> **Note on `hooks/`** — the build needs `hooks/hook-altium_monkey.py`. `altium_monkey`
+> imports part of its public surface dynamically (`importlib.import_module` over a dict of
+> module names), which PyInstaller's static analysis cannot see, so without that hook the
+> bundle is missing modules and the packaged app fails to open any `.PcbDoc` with
+> `No module named 'altium_monkey.…'`. The spec picks the hook up automatically via
+> `hookspath=['hooks']` — just don't delete the directory.
+
+### Verifying a build
+
+The failure above only appears when a board is actually loaded, so a build that launches
+fine can still be broken. Check the packaged app against a real `.PcbDoc` before shipping:
+
+```powershell
+dist\AltiumAssemblyTool\AltiumAssemblyTool.exe "C:\path\to\board.PcbDoc"
+```
+
+The board should render and the BOM should populate. Testing on a machine with no Python
+and no `altium_monkey` installed is the only way to catch bundling gaps, since a dev
+machine can satisfy imports from its own site-packages.
