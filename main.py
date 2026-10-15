@@ -96,21 +96,21 @@ def _apply_row_colors(
     cell_brush = QBrush(_COLOR_PLACED_CELL)
     none_brush = QBrush()
     if all_done:
-        for col in range(8):
+        for col in range(9):
             item = table.item(row, col)
             if item:
                 item.setBackground(row_brush)
     else:
-        for col in range(6):
+        for col in range(7):
             item = table.item(row, col)
             if item:
                 item.setBackground(none_brush)
-        item6 = table.item(row, 6)
         item7 = table.item(row, 7)
-        if item6:
-            item6.setBackground(cell_brush if top_done else none_brush)
+        item8 = table.item(row, 8)
         if item7:
-            item7.setBackground(cell_brush if bot_done else none_brush)
+            item7.setBackground(cell_brush if top_done else none_brush)
+        if item8:
+            item8.setBackground(cell_brush if bot_done else none_brush)
 
 
 def _normalize_text(text: str) -> str:
@@ -359,6 +359,10 @@ class MainWindow(QMainWindow):
         self._btn_fit = QPushButton("Fit View")
         self._btn_fit_sel = QPushButton("Fit Selection")
         self._btn_fit_sel.setToolTip("Zoom to the components of the selected BOM row")
+        self._btn_rotate_ccw = QPushButton("Rotate ↺")
+        self._btn_rotate_ccw.setToolTip("Rotate board 90° counter-clockwise (Shift+R)")
+        self._btn_rotate_cw = QPushButton("Rotate ↻")
+        self._btn_rotate_cw.setToolTip("Rotate board 90° clockwise (R / Ctrl+R)")
 
         self._btn_auto_zoom = QPushButton("Auto Zoom")
         self._btn_auto_zoom.setCheckable(True)
@@ -429,7 +433,8 @@ class MainWindow(QMainWindow):
             flow.addWidget(w)
 
         _section("View")
-        for w in (self._btn_fit, self._btn_fit_sel, self._btn_auto_zoom, self._btn_labels,
+        for w in (self._btn_fit, self._btn_fit_sel, self._btn_rotate_ccw, self._btn_rotate_cw,
+                  self._btn_auto_zoom, self._btn_labels,
                   self._btn_silkscreen, self._btn_clear, self._btn_dnp_view):
             flow.addWidget(w)
 
@@ -445,6 +450,8 @@ class MainWindow(QMainWindow):
         self._btn_next.setEnabled(False)
         self._btn_fit.setEnabled(False)
         self._btn_fit_sel.setEnabled(False)
+        self._btn_rotate_ccw.setEnabled(False)
+        self._btn_rotate_cw.setEnabled(False)
         self._btn_clear.setEnabled(False)
         self._btn_dnp_view.setEnabled(False)
         self._btn_save_state.setEnabled(False)
@@ -504,12 +511,22 @@ class MainWindow(QMainWindow):
             "Uncheck to search only by component value/name."
         )
         bom_header.addWidget(self._btn_search_refs)
+        self._btn_side_filter = QPushButton("Current Side Only")
+        self._btn_side_filter.setCheckable(True)
+        self._btn_side_filter.setChecked(False)
+        self._btn_side_filter.setStyleSheet(_SIDE_BTN_STYLE)
+        self._btn_side_filter.setMinimumWidth(160)
+        self._btn_side_filter.setToolTip(
+            "When checked, only show components on the currently displayed side."
+        )
+        self._btn_side_filter.setEnabled(False)
+        bom_header.addWidget(self._btn_side_filter)
         bom_header.addStretch(1)
         bottom_layout.addLayout(bom_header)
 
-        self._bom_table = QTableWidget(0, 8)
+        self._bom_table = QTableWidget(0, 9)
         self._bom_table.setHorizontalHeaderLabels(
-            ["#", "QTY", "Placed", "To Place", "Name", "Serial Number", "Top Refs", "Bottom Refs"]
+            ["✓", "#", "QTY", "Placed", "To Place", "Name", "Serial Number", "Top Refs", "Bottom Refs"]
         )
         hdr = self._bom_table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -523,8 +540,8 @@ class MainWindow(QMainWindow):
         self._bom_table.setAlternatingRowColors(True)
         self._bom_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         _html_delegate = _HtmlDelegate(self._bom_table)
-        self._bom_table.setItemDelegateForColumn(6, _html_delegate)
         self._bom_table.setItemDelegateForColumn(7, _html_delegate)
+        self._bom_table.setItemDelegateForColumn(8, _html_delegate)
         bottom_layout.addWidget(self._bom_table)
 
         splitter.addWidget(self._viewer)
@@ -544,6 +561,8 @@ class MainWindow(QMainWindow):
         self._btn_next.clicked.connect(self._on_next)
         self._btn_fit.clicked.connect(self._viewer.fit_to_view)
         self._btn_fit_sel.clicked.connect(self._zoom_to_selection)
+        self._btn_rotate_ccw.clicked.connect(self._on_rotate_ccw)
+        self._btn_rotate_cw.clicked.connect(self._on_rotate_cw)
         self._btn_auto_zoom.toggled.connect(self._on_auto_zoom_toggled)
         self._btn_labels.toggled.connect(lambda _checked: self._update_viewer())
         self._btn_clear.clicked.connect(self._on_clear_selection)
@@ -559,11 +578,13 @@ class MainWindow(QMainWindow):
         self._search_box.textChanged.connect(self._apply_row_filters)
         self._btn_search_sn.toggled.connect(self._apply_row_filters)
         self._btn_search_refs.toggled.connect(self._apply_row_filters)
+        self._btn_side_filter.toggled.connect(self._on_side_filter_toggled)
         self._btn_silkscreen.toggled.connect(lambda _checked: self._update_viewer())
         self._combo_variant.currentTextChanged.connect(self._on_variant_changed)
         self._bom_table.currentCellChanged.connect(
             lambda row, *_: self._on_bom_row_changed(row)
         )
+        self._bom_table.itemChanged.connect(self._on_bom_item_changed)
         self._bom_table.customContextMenuRequested.connect(self._on_bom_context_menu)
 
     # ------------------------------------------------------------------
@@ -688,10 +709,13 @@ class MainWindow(QMainWindow):
 
         self._rebuild_active_bom()
         self._viewer.set_flip(False)
+        self._viewer.set_rotation(0)
         self._update_viewer()
         QTimer.singleShot(0, self._viewer.fit_to_view)
         self._btn_fit.setEnabled(True)
         self._btn_fit_sel.setEnabled(True)
+        self._btn_rotate_ccw.setEnabled(True)
+        self._btn_rotate_cw.setEnabled(True)
         self._btn_clear.setEnabled(True)
         self._btn_dnp_view.setEnabled(True)
         self._btn_save_state.setEnabled(True)
@@ -699,6 +723,12 @@ class MainWindow(QMainWindow):
         self._btn_top_view.setEnabled(True)
         self._btn_bottom_view.setEnabled(True)
         self._btn_top_view.setChecked(True)
+        self._btn_side_filter.setEnabled(True)
+        self._btn_side_filter.blockSignals(True)
+        self._btn_side_filter.setChecked(False)
+        self._btn_side_filter.blockSignals(False)
+        self._update_side_filter_label()
+        self._update_to_place_header()
         self._update_navigation()
         self._update_progress()
         self._add_recent_file(model.filepath)
@@ -746,17 +776,72 @@ class MainWindow(QMainWindow):
         self._show_error(title, message)
 
     def _on_prev(self) -> None:
-        if self._active_bom and self._current_index > 0:
-            self._select_row(self._current_index - 1)
+        if not self._active_bom:
+            return
+        start = self._current_index - 1 if self._current_index > 0 else len(self._active_bom) - 1
+        for r in range(start, -1, -1):
+            if not self._bom_table.isRowHidden(r):
+                self._select_row(r)
+                break
 
     def _on_next(self) -> None:
-        if self._active_bom and self._current_index < len(self._active_bom) - 1:
-            self._select_row(self._current_index + 1)
+        if not self._active_bom:
+            return
+        start = self._current_index + 1 if self._current_index >= 0 else 0
+        for r in range(start, len(self._active_bom)):
+            if not self._bom_table.isRowHidden(r):
+                self._select_row(r)
+                break
+
+    def _update_side_filter_label(self) -> None:
+        side_str = "Top" if self._view_side == "TOP" else "Bottom"
+        if self._btn_side_filter.isChecked():
+            self._btn_side_filter.setText(f"Current Side ({side_str})")
+        else:
+            self._btn_side_filter.setText("Current Side Only")
+
+    def _on_side_filter_toggled(self, _checked: bool) -> None:
+        self._update_side_filter_label()
+        self._update_to_place_header()
+        self._refresh_all_to_place_cells()
+        self._apply_row_filters()
+
+    def _update_to_place_header(self) -> None:
+        side_filtered = self._btn_side_filter.isChecked()
+        side_str = "Top" if self._view_side == "TOP" else "Bottom"
+        header_text = f"To Place ({side_str})" if side_filtered else "To Place"
+        item = self._bom_table.horizontalHeaderItem(4)
+        if item:
+            item.setText(header_text)
+
+    def _refresh_all_to_place_cells(self) -> None:
+        self._bom_table.blockSignals(True)
+        effective = self._placement.placed | self._dnp
+        side_filtered = self._btn_side_filter.isChecked()
+        for row, (entry, visible) in enumerate(self._active_bom):
+            refs = entry.top_refs if self._view_side == "TOP" else entry.bot_refs
+            is_done = bool(refs) and all(d in effective for d in refs)
+            if side_filtered:
+                to_place = sum(1 for d in refs if d not in effective)
+            else:
+                placed_count = sum(1 for d in visible if d in effective)
+                to_place = len(visible) - placed_count
+            check_item = self._bom_table.item(row, 0)
+            if check_item:
+                check_item.setCheckState(Qt.CheckState.Checked if is_done else Qt.CheckState.Unchecked)
+            to_place_item = self._bom_table.item(row, 4)
+            if to_place_item:
+                to_place_item.setText(str(to_place))
+        self._bom_table.blockSignals(False)
 
     def _on_view_top(self) -> None:
         self._view_side = "TOP"
         self._viewer.set_flip(False)
         self._refresh_svg()
+        self._update_side_filter_label()
+        self._update_to_place_header()
+        self._refresh_all_to_place_cells()
+        self._apply_row_filters()
         # set_flip queues a full fit; queue the selection zoom behind it
         QTimer.singleShot(0, self._auto_zoom_if_enabled)
 
@@ -764,6 +849,24 @@ class MainWindow(QMainWindow):
         self._view_side = "BOTTOM"
         self._viewer.set_flip(True)
         self._refresh_svg()
+        self._update_side_filter_label()
+        self._update_to_place_header()
+        self._refresh_all_to_place_cells()
+        self._apply_row_filters()
+        QTimer.singleShot(0, self._auto_zoom_if_enabled)
+
+    def _on_rotate_cw(self) -> None:
+        if self._model is None:
+            return
+        self._viewer.rotate_cw()
+        self.statusBar().showMessage(f"Board rotated to {self._viewer.rotation}°")
+        QTimer.singleShot(0, self._auto_zoom_if_enabled)
+
+    def _on_rotate_ccw(self) -> None:
+        if self._model is None:
+            return
+        self._viewer.rotate_ccw()
+        self.statusBar().showMessage(f"Board rotated to {self._viewer.rotation}°")
         QTimer.singleShot(0, self._auto_zoom_if_enabled)
 
     def _refresh_svg(self) -> None:
@@ -1066,7 +1169,7 @@ class MainWindow(QMainWindow):
         return None
 
     def _on_viewer_click(self, item_x: float, item_y: float) -> None:
-        """Single click on the board: identify the component in the status bar + BOM."""
+        """Single click on the board: identify and select the component in the BOM list."""
         if self._model is None:
             return
         hidden = self._model.hidden_designators_for_side(self._view_side)
@@ -1084,18 +1187,21 @@ class MainWindow(QMainWindow):
         msg = " — ".join(parts)
         if row is not None:
             msg += f"  (row {row + 1})"
+            if self._bom_table.isRowHidden(row):
+                self._bom_table.setRowHidden(row, False)
+            self._select_row(row)
             self._flash_bom_row(row)
         self.statusBar().showMessage(msg, 6000)
 
     def _flash_bom_row(self, row: int) -> None:
-        """Scroll to a BOM row and briefly highlight it without changing the selection."""
+        """Scroll to a BOM row and briefly highlight it."""
         item = self._bom_table.item(row, 0)
         if item is None:
             return
         self._bom_table.scrollToItem(item)
-        brush = QBrush(QColor(255, 200, 0, 130))
+        brush = QBrush(QColor(255, 200, 0, 160))
         self._bom_table.blockSignals(True)
-        for col in range(8):
+        for col in range(9):
             it = self._bom_table.item(row, col)
             if it:
                 it.setBackground(brush)
@@ -1106,6 +1212,8 @@ class MainWindow(QMainWindow):
         if 0 <= row < len(self._active_bom):
             self._bom_table.blockSignals(True)
             self._refresh_bom_row(row)
+            if self._current_index == row:
+                self._bom_table.selectRow(row)
             self._bom_table.blockSignals(False)
 
     # ------------------------------------------------------------------
@@ -1186,52 +1294,71 @@ class MainWindow(QMainWindow):
             return
         n = len(self._active_bom)
         idx = self._current_index
-        self._btn_prev.setEnabled(idx > 0)
-        self._btn_next.setEnabled(idx < n - 1)
+        has_prev = any(not self._bom_table.isRowHidden(r) for r in range(0, idx)) if idx > 0 else False
+        has_next = any(not self._bom_table.isRowHidden(r) for r in range(max(idx + 1, 0), n))
+        self._btn_prev.setEnabled(has_prev)
+        self._btn_next.setEnabled(has_next)
         self._lbl_step.setText(f"Step {idx + 1} of {n}" if idx >= 0 else f"0 of {n}")
 
     def _apply_default_column_widths(self) -> None:
         w = self._bom_table.viewport().width()
         if w <= 0:
             return
-        self._bom_table.setColumnWidth(0, int(w * 0.03))  # #
-        self._bom_table.setColumnWidth(1, int(w * 0.05))  # QTY
-        self._bom_table.setColumnWidth(2, int(w * 0.05))  # Placed
-        self._bom_table.setColumnWidth(3, int(w * 0.06))  # To Place
-        self._bom_table.setColumnWidth(4, int(w * 0.18))  # Name
-        self._bom_table.setColumnWidth(5, int(w * 0.18))  # Part Number
-        self._bom_table.setColumnWidth(6, int(w * 0.23))  # Top Refs
-        # column 7 (Bottom Refs) fills the remainder via setStretchLastSection(True)
+        self._bom_table.setColumnWidth(0, 32)              # ✓
+        self._bom_table.setColumnWidth(1, int(w * 0.03))  # #
+        self._bom_table.setColumnWidth(2, int(w * 0.05))  # QTY
+        self._bom_table.setColumnWidth(3, int(w * 0.05))  # Placed
+        self._bom_table.setColumnWidth(4, int(w * 0.08))  # To Place
+        self._bom_table.setColumnWidth(5, int(w * 0.17))  # Name
+        self._bom_table.setColumnWidth(6, int(w * 0.17))  # Part Number
+        self._bom_table.setColumnWidth(7, int(w * 0.21))  # Top Refs
+        # column 8 (Bottom Refs) fills the remainder via setStretchLastSection(True)
 
     def _populate_bom_table(self, active: list[tuple[BomEntry, list[str]]]) -> None:
         placed = self._placement.placed
         dnp = self._dnp
         effective = placed | dnp
+        side_filtered = self._btn_side_filter.isChecked()
         self._bom_table.blockSignals(True)
         self._bom_table.clearContents()
         self._bom_table.setRowCount(len(active))
         for row, (entry, visible) in enumerate(active):
             placed_count = sum(1 for d in visible if d in effective)
+            refs = entry.top_refs if self._view_side == "TOP" else entry.bot_refs
+            is_done = bool(refs) and all(d in effective for d in refs)
+            if side_filtered:
+                to_place_count = sum(1 for d in refs if d not in effective)
+            else:
+                to_place_count = len(visible) - placed_count
+
+            check_item = QTableWidgetItem()
+            check_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            check_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            check_item.setCheckState(Qt.CheckState.Checked if is_done else Qt.CheckState.Unchecked)
+            self._bom_table.setItem(row, 0, check_item)
+
             def _centered(text: str) -> QTableWidgetItem:
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 return item
-            self._bom_table.setItem(row, 0, _centered(str(row + 1)))
-            self._bom_table.setItem(row, 1, _centered(str(len(visible))))
-            self._bom_table.setItem(row, 2, _centered(str(placed_count)))
-            self._bom_table.setItem(row, 3, _centered(str(len(visible) - placed_count)))
+
+            self._bom_table.setItem(row, 1, _centered(str(row + 1)))
+            self._bom_table.setItem(row, 2, _centered(str(len(visible))))
+            self._bom_table.setItem(row, 3, _centered(str(placed_count)))
+            self._bom_table.setItem(row, 4, _centered(str(to_place_count)))
             name_item = QTableWidgetItem(entry.comment)
             if entry.description:
                 name_item.setToolTip(entry.description)
-            self._bom_table.setItem(row, 4, name_item)
+            self._bom_table.setItem(row, 5, name_item)
             pn_item = QTableWidgetItem(entry.part_number)
             if entry.description:
                 pn_item.setToolTip(entry.description)
-            self._bom_table.setItem(row, 5, pn_item)
-            self._bom_table.setItem(row, 6, QTableWidgetItem(_refs_html(entry.top_refs, placed, dnp)))
-            self._bom_table.setItem(row, 7, QTableWidgetItem(_refs_html(entry.bot_refs, placed, dnp)))
+            self._bom_table.setItem(row, 6, pn_item)
+            self._bom_table.setItem(row, 7, QTableWidgetItem(_refs_html(entry.top_refs, placed, dnp)))
+            self._bom_table.setItem(row, 8, QTableWidgetItem(_refs_html(entry.bot_refs, placed, dnp)))
             _apply_row_colors(self._bom_table, row, entry.top_refs, entry.bot_refs, visible, placed, dnp)
         self._bom_table.blockSignals(False)
+        self._update_to_place_header()
         self._apply_default_column_widths()
         self._bom_table.resizeRowsToContents()
         self._apply_row_filters()
@@ -1243,19 +1370,52 @@ class MainWindow(QMainWindow):
         dnp = self._dnp
         effective = placed | dnp
         placed_count = sum(1 for d in visible if d in effective)
-        placed_item = self._bom_table.item(row, 2)
-        to_place_item = self._bom_table.item(row, 3)
+        refs = entry.top_refs if self._view_side == "TOP" else entry.bot_refs
+        is_done = bool(refs) and all(d in effective for d in refs)
+        side_filtered = self._btn_side_filter.isChecked()
+        if side_filtered:
+            to_place_count = sum(1 for d in refs if d not in effective)
+        else:
+            to_place_count = len(visible) - placed_count
+
+        check_item = self._bom_table.item(row, 0)
+        if check_item:
+            check_item.setCheckState(Qt.CheckState.Checked if is_done else Qt.CheckState.Unchecked)
+
+        placed_item = self._bom_table.item(row, 3)
+        to_place_item = self._bom_table.item(row, 4)
         if placed_item:
             placed_item.setText(str(placed_count))
         if to_place_item:
-            to_place_item.setText(str(len(visible) - placed_count))
-        top_item = self._bom_table.item(row, 6)
-        bot_item = self._bom_table.item(row, 7)
+            to_place_item.setText(str(to_place_count))
+        top_item = self._bom_table.item(row, 7)
+        bot_item = self._bom_table.item(row, 8)
         if top_item:
             top_item.setText(_refs_html(entry.top_refs, placed, dnp))
         if bot_item:
             bot_item.setText(_refs_html(entry.bot_refs, placed, dnp))
         _apply_row_colors(self._bom_table, row, entry.top_refs, entry.bot_refs, visible, placed, dnp)
+
+    def _on_bom_item_changed(self, item: QTableWidgetItem) -> None:
+        if item.column() != 0:
+            return
+        row = item.row()
+        if row < 0 or row >= len(self._active_bom):
+            return
+        entry, visible = self._active_bom[row]
+        is_checked = (item.checkState() == Qt.CheckState.Checked)
+        refs = entry.top_refs if self._view_side == "TOP" else entry.bot_refs
+        target = [d for d in refs if d not in self._dnp]
+
+        self._placement.set_placed(target, is_checked)
+        self._auto_save_if_enabled()
+        self._update_viewer()
+        self._bom_table.blockSignals(True)
+        self._refresh_bom_row(row)
+        self._bom_table.blockSignals(False)
+        self._update_progress()
+        if self._btn_hide_fitted.isChecked():
+            self._apply_row_filters()
 
     def _update_bom_colors(self) -> None:
         """Refresh ref HTML and row/cell colours without rebuilding the whole table."""
@@ -1287,18 +1447,37 @@ class MainWindow(QMainWindow):
         return bool(visible) and all(d in effective for d in visible)
 
     def _apply_row_filters(self, *_args) -> None:
-        """Hide BOM rows per the 'Hide Fitted' toggle and the search box."""
+        """Hide BOM rows per the 'Hide Fitted' toggle, side filter, and the search box."""
         hide_fitted = self._btn_hide_fitted.isChecked()
         query = self._search_box.text().strip().lower()
         search_sn = self._btn_search_sn.isChecked()
         search_refs = self._btn_search_refs.isChecked()
+        side_filtered = self._btn_side_filter.isChecked()
+        effective = self._placement.placed | self._dnp
+
         for row, (entry, visible) in enumerate(self._active_bom):
-            hidden = (hide_fitted and self._row_is_complete(visible)) or (
-                bool(query) and not _entry_matches(entry, query,
-                                                    search_sn=search_sn,
-                                                    search_refs=search_refs)
+            side_mismatch = False
+            if side_filtered:
+                if self._view_side == "TOP" and not entry.top_refs:
+                    side_mismatch = True
+                elif self._view_side == "BOTTOM" and not entry.bot_refs:
+                    side_mismatch = True
+
+            if side_filtered:
+                refs = entry.top_refs if self._view_side == "TOP" else entry.bot_refs
+                is_fitted = bool(refs) and all(d in effective for d in refs)
+            else:
+                is_fitted = self._row_is_complete(visible)
+
+            hidden = (
+                side_mismatch
+                or (hide_fitted and is_fitted)
+                or (bool(query) and not _entry_matches(entry, query,
+                                                       search_sn=search_sn,
+                                                       search_refs=search_refs))
             )
             self._bom_table.setRowHidden(row, hidden)
+        self._update_navigation()
 
     # ------------------------------------------------------------------
     # Keyboard navigation
@@ -1313,6 +1492,14 @@ class MainWindow(QMainWindow):
             self._on_next()
         elif event.key() == Qt.Key.Key_Up and not self._bom_table.hasFocus():
             self._on_prev()
+        elif (
+            (event.key() == Qt.Key.Key_R and not self._search_box.hasFocus() and not self._bom_table.hasFocus())
+            or (event.key() == Qt.Key.Key_R and bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier))
+        ):
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                self._on_rotate_ccw()
+            else:
+                self._on_rotate_cw()
         else:
             super().keyPressEvent(event)
 

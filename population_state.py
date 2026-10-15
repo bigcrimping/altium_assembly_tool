@@ -26,6 +26,19 @@ class PopulationState:
         self.is_modified = True
         return designator in self._placed
 
+    def set_placed(self, designators, placed: bool) -> None:
+        """Set placed state for an iterable of designators."""
+        changed = False
+        for d in designators:
+            if placed and d not in self._placed:
+                self._placed.add(d)
+                changed = True
+            elif not placed and d in self._placed:
+                self._placed.discard(d)
+                changed = True
+        if changed:
+            self.is_modified = True
+
     def clear(self) -> None:
         self._placed.clear()
         self.is_modified = False

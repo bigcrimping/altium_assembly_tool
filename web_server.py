@@ -186,6 +186,37 @@ class WebServer:
                     "bom_row": row_data,
                 })
 
+        @app.route("/api/set_row_placed", methods=["POST"])
+        def api_set_row_placed():
+            data = request.get_json(force=True)
+            row_idx = data.get("row", -1)
+            placed_state = bool(data.get("placed", True))
+            side = data.get("side", "ALL").upper()
+            with self._lock:
+                model = self._model
+                if model is None or not (0 <= row_idx < len(model.bom)):
+                    return jsonify({"ok": False, "error": "invalid row"})
+                entry = model.bom[row_idx]
+                if side == "TOP":
+                    target = [d for d in entry.top_refs if d not in self._dnp]
+                elif side == "BOTTOM":
+                    target = [d for d in entry.bot_refs if d not in self._dnp]
+                else:
+                    target = [d for d in entry.designators if d not in self._dnp]
+                self._placement.set_placed(target, placed_state)
+                if self._state_path:
+                    self._placement.save(self._state_path)
+                placed = self._placement.placed
+                dnp = self._dnp
+                row_data = self._bom_row_dict(row_idx, entry, placed, dnp)
+                return jsonify({
+                    "ok": True,
+                    "row": row_idx,
+                    "placed_desigs": target,
+                    "placed": placed_state,
+                    "bom_row": row_data,
+                })
+
         @app.route("/api/load", methods=["POST"])
         def api_load():
             data = request.get_json(force=True)

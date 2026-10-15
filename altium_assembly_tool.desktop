@@ -1,0 +1,16 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Altium Assembly Tool
+Comment=2D PCB assembly viewer for Altium .PcbDoc files
+Exec=/home/dell/Downloads/altium_assembly_tool_tweaked-main/.venv/bin/python /home/dell/Downloads/altium_assembly_tool_tweaked-main/main.py %f
+Icon=/home/dell/Downloads/altium_assembly_tool_tweaked-main/assets/icon.svg
+Path=/home/dell/Downloads/altium_assembly_tool_tweaked-main
+Terminal=false
+Categories=Development;Electronics;Engineering;
+MimeType=application/octet-stream;
+Actions=BrowserMode;
+
+[Desktop Action BrowserMode]
+Name=Launch in Browser Mode
+Exec=/home/dell/Downloads/altium_assembly_tool_tweaked-main/.venv/bin/python /home/dell/Downloads/altium_assembly_tool_tweaked-main/main.py --browser %f
