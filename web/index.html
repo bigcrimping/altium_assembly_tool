@@ -26,6 +26,8 @@
   <div class="tb-group">
     <button class="btn" id="btn-fit" disabled>Fit View</button>
     <button class="btn" id="btn-fit-sel" disabled title="Zoom to the selected BOM row's components">Fit Selection</button>
+    <button class="btn" id="btn-rotate-ccw" disabled title="Rotate PCB 90° counter-clockwise (Shift+R)">Rotate &#8630;</button>
+    <button class="btn" id="btn-rotate-cw" disabled title="Rotate PCB 90° clockwise (R)">Rotate &#8631;</button>
     <button class="btn" id="btn-auto-zoom" disabled title="Automatically zoom to each BOM row as you step through">Auto Zoom</button>
     <button class="btn" id="btn-labels" disabled title="Show designator labels on the selected row's components">Labels</button>
     <button class="btn" id="btn-silkscreen" disabled title="Show/hide silkscreen layer outlines and text overlay">Silkscreen</button>
@@ -79,15 +81,17 @@
       <input type="text" id="bom-search" placeholder="Filter by designator, name, or serial number&hellip;" autocomplete="off" disabled>
       <button class="btn active-side" id="btn-search-sn" disabled title="When enabled, search includes Serial/Part Numbers. Disable for exact Value searching (e.g. 1R).">Include SN</button>
       <button class="btn active-side" id="btn-search-refs" disabled title="When enabled, search includes component designators (R1, C3, U5…). Disable to search only by component value/name.">Include Refs</button>
+      <button class="btn" id="btn-side-filter" disabled title="Filter BOM rows to only show components on the currently displayed side">Current Side Only</button>
     </div>
     <div id="bom-scroll">
       <table id="bom-table">
         <thead>
           <tr>
+            <th style="width: 28px; text-align: center;">✓</th>
             <th>#</th>
             <th>QTY</th>
             <th>Placed</th>
-            <th>To Place</th>
+            <th id="th-toplace">To Place</th>
             <th>Name</th>
             <th>Serial Number</th>
             <th>Top Refs</th>

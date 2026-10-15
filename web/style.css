@@ -45,11 +45,19 @@ body {
 .btn:hover:not(:disabled) { background: #505050; color: #fff; }
 .btn:disabled { opacity: 0.4; cursor: default; }
 
-.btn.active-side {
-  background: #0078d4;
-  color: #fff;
-  border-color: #005a9e;
+.btn.active-side,
+#btn-side-filter.active-side {
+  background: #0078d4 !important;
+  color: #fff !important;
+  border-color: #005a9e !important;
   font-weight: bold;
+}
+
+#btn-side-filter {
+  min-width: 160px;
+  padding: 4px 14px;
+  text-align: center;
+  flex-shrink: 0;
 }
 
 .board-name {
@@ -205,7 +213,17 @@ body {
 #bom-table td:nth-child(1),
 #bom-table td:nth-child(2),
 #bom-table td:nth-child(3),
-#bom-table td:nth-child(4) { text-align: center; }
+#bom-table td:nth-child(4),
+#bom-table td:nth-child(5) { text-align: center; }
+
+.row-checkbox {
+  cursor: pointer;
+  width: 14px;
+  height: 14px;
+  accent-color: #0078d4;
+  vertical-align: middle;
+  margin: 0;
+}
 
 /* Row / cell completion colors */
 #bom-table tbody tr.row-all-done td { background: #3a7a3a !important; }
@@ -216,9 +234,9 @@ body {
 .ref-dnp    { color: #ff7a33; }
 
 /* Click-to-identify flash on a BOM row */
-#bom-table tbody tr.flash td { animation: rowflash 0.8s ease-out; }
+#bom-table tbody tr.flash td { animation: rowflash 1s ease-out; }
 @keyframes rowflash {
-  0%   { background-color: #b58a00; }
+  0%   { background-color: #d4a017 !important; color: #fff; }
   100% { }
 }
 

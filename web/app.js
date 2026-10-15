@@ -15,6 +15,8 @@ const state = {
   autoZoom: false,
   labels: true,
   dnpView: false,   // show every DNP part board-wide instead of a single BOM row
+  rotation: 0,      // board rotation in degrees (0, 90, 180, 270)
+  sideFilterActive: false, // filter BOM rows to current displayed side only
   searchSn: true,   // include Part/Serial numbers in search
   searchRefs: true, // include component designators in search
   silkscreenView: false, // show silkscreen layer outlines/text
@@ -94,10 +96,14 @@ function applyData(data) {
   state.loaded = true;
   state.step   = -1;
   state.side   = 'TOP';
+  state.rotation = 0;
+  state.sideFilterActive = false;
   state.dnpView = false;
   undoStack.length = 0;
   redoStack.length = 0;
   boardNameEl.textContent = data.board_name;
+
+  updateSideFilterButton();
 
   if (data.variants && data.variants.length > 0) {
     variantSelect.innerHTML = '';
@@ -209,8 +215,10 @@ function renderRecents() {
 
 // ── Controls ──────────────────────────────────────────────────────────────────
 function enableControls(on) {
-  ['btn-prev','btn-next','btn-fit','btn-fit-sel','btn-auto-zoom','btn-labels','btn-silkscreen',
-   'btn-clear','btn-dnp','btn-top','btn-bot','btn-hide-fitted','bom-search','btn-search-sn','btn-search-refs'].forEach(id => {
+  ['btn-prev','btn-next','btn-fit','btn-fit-sel','btn-rotate-ccw','btn-rotate-cw',
+   'btn-auto-zoom','btn-labels','btn-silkscreen',
+   'btn-clear','btn-dnp','btn-top','btn-bot','btn-hide-fitted','bom-search','btn-search-sn','btn-search-refs',
+   'btn-side-filter'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.disabled = !on;
   });
@@ -222,13 +230,35 @@ function enableControls(on) {
 
 document.getElementById('btn-fit').addEventListener('click', fitView);
 document.getElementById('btn-fit-sel').addEventListener('click', fitSelection);
+document.getElementById('btn-rotate-ccw').addEventListener('click', rotateCcw);
+document.getElementById('btn-rotate-cw').addEventListener('click', rotateCw);
 document.getElementById('btn-clear').addEventListener('click', clearSelection);
 document.getElementById('btn-prev').addEventListener('click', () => {
-  if (state.step > 0) selectStep(state.step - 1);
+  if (!state.loaded || !state.bom.length) return;
+  const start = state.step > 0 ? state.step - 1 : state.bom.length - 1;
+  for (let i = start; i >= 0; i--) {
+    const tr = bomBody.children[i];
+    if (tr && tr.style.display !== 'none') { selectStep(i); break; }
+  }
 });
 document.getElementById('btn-next').addEventListener('click', () => {
-  if (state.step < state.bom.length - 1) selectStep(state.step + 1);
+  if (!state.loaded || !state.bom.length) return;
+  const start = state.step >= 0 ? state.step + 1 : 0;
+  for (let i = start; i < state.bom.length; i++) {
+    const tr = bomBody.children[i];
+    if (tr && tr.style.display !== 'none') { selectStep(i); break; }
+  }
 });
+
+const sideFilterBtn = document.getElementById('btn-side-filter');
+if (sideFilterBtn) {
+  sideFilterBtn.addEventListener('click', () => {
+    state.sideFilterActive = !state.sideFilterActive;
+    updateSideFilterButton();
+    updateAllToPlaceCells();
+    applyRowFilters();
+  });
+}
 document.getElementById('btn-top').addEventListener('click', () => setSide('TOP'));
 document.getElementById('btn-bot').addEventListener('click', () => setSide('BOTTOM'));
 
@@ -327,12 +357,23 @@ function clearSelection() {
   if (state.autoZoom) fitView();
 }
 
+function updateSideFilterButton() {
+  const btn = document.getElementById('btn-side-filter');
+  if (!btn) return;
+  btn.classList.toggle('active-side', state.sideFilterActive);
+  const sideStr = state.side === 'TOP' ? 'Top' : 'Bottom';
+  btn.textContent = state.sideFilterActive ? `Current Side (${sideStr})` : 'Current Side Only';
+}
+
 function setSide(side) {
   if (side === state.side) return;
   state.side = side;
   updateSideButtons();
+  updateSideFilterButton();
+  updateAllToPlaceCells();
   applySideFlip();
   refreshBoard();
+  applyRowFilters();
   if (state.autoZoom) autoZoomNow();
 }
 
@@ -348,8 +389,20 @@ function updateSideButtons() {
 
 function updateNavigation() {
   const n = state.bom.length, idx = state.step;
-  document.getElementById('btn-prev').disabled = !state.loaded || idx <= 0;
-  document.getElementById('btn-next').disabled = !state.loaded || idx >= n - 1;
+  let hasPrev = false, hasNext = false;
+  if (state.loaded && n > 0) {
+    for (let i = 0; i < idx; i++) {
+      const tr = bomBody.children[i];
+      if (tr && tr.style.display !== 'none') { hasPrev = true; break; }
+    }
+    const start = Math.max(idx + 1, 0);
+    for (let i = start; i < n; i++) {
+      const tr = bomBody.children[i];
+      if (tr && tr.style.display !== 'none') { hasNext = true; break; }
+    }
+  }
+  document.getElementById('btn-prev').disabled = !state.loaded || !hasPrev;
+  document.getElementById('btn-next').disabled = !state.loaded || !hasNext;
   stepLabel.textContent = state.loaded
     ? (idx >= 0 ? `Step ${idx + 1} of ${n}` : `0 of ${n}`)
     : '';
@@ -377,12 +430,50 @@ function refsHtml(refs) {
   }).join(', ');
 }
 
+function isRowPlaced(row) {
+  if (!row) return false;
+  return state.side === 'TOP' ? row.top_done : row.bot_done;
+}
+
+function getToPlaceCount(row) {
+  if (!row) return 0;
+  if (state.sideFilterActive) {
+    const refs = state.side === 'TOP' ? (row.top_refs || []) : (row.bot_refs || []);
+    return refs.filter(d => !state.placed.has(d) && !state.dnp.has(d)).length;
+  }
+  return row.to_place_count;
+}
+
+function updateAllToPlaceCells() {
+  const th = document.getElementById('th-toplace') || document.querySelector('#bom-table thead th:nth-child(5)');
+  if (th) {
+    th.textContent = state.sideFilterActive
+      ? `To Place (${state.side === 'TOP' ? 'Top' : 'Bottom'})`
+      : 'To Place';
+  }
+  state.bom.forEach((row, idx) => {
+    const tr = bomBody.children[idx];
+    if (tr) {
+      if (tr.children[4]) {
+        tr.children[4].textContent = getToPlaceCount(row);
+      }
+      const cb = tr.children[0] ? tr.children[0].querySelector('input.row-checkbox') : null;
+      if (cb) {
+        const isDone = isRowPlaced(row);
+        cb.checked = isDone;
+        cb.title = isDone ? 'Mark unplaced' : 'Mark component type as placed';
+      }
+    }
+  });
+}
+
 function renderBomTable() {
   bomBody.innerHTML = '';
   state.bom.forEach((row, idx) => {
     const tr = buildBomRow(row, idx);
     bomBody.appendChild(tr);
   });
+  updateAllToPlaceCells();
 }
 
 function buildBomRow(row, idx) {
@@ -390,11 +481,14 @@ function buildBomRow(row, idx) {
   tr.dataset.idx = idx;
   tr.addEventListener('click', () => selectStep(idx));
 
+  const isDone = isRowPlaced(row);
+
   const cells = [
+    { isCheckbox: true,         center: true },
     { text: idx + 1,            center: true },
     { text: row.quantity,       center: true },
     { text: row.placed_count,   center: true, id: 'placed' },
-    { text: row.to_place_count, center: true, id: 'toplace' },
+    { text: getToPlaceCount(row), center: true, id: 'toplace' },
     { text: row.comment,        tooltip: row.description },
     { text: row.part_number || '', tooltip: row.description },
     { html: refsHtml(row.top_refs), id: 'toprefs',
@@ -405,8 +499,22 @@ function buildBomRow(row, idx) {
 
   cells.forEach(c => {
     const td = document.createElement('td');
-    if (c.html !== undefined) td.innerHTML = c.html;
-    else td.textContent = c.text;
+    if (c.isCheckbox) {
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.className = 'row-checkbox';
+      cb.checked = isDone;
+      cb.title = isDone ? 'Mark unplaced' : 'Mark component type as placed';
+      cb.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleRowPlaced(idx, cb.checked);
+      });
+      td.appendChild(cb);
+    } else if (c.html !== undefined) {
+      td.innerHTML = c.html;
+    } else {
+      td.textContent = c.text;
+    }
     if (c.center) td.style.textAlign = 'center';
     if (c.tooltip) td.title = c.tooltip;
     if (c.sideDone) td.classList.add('cell-side-done');
@@ -421,16 +529,49 @@ function updateBomRow(rowData) {
   state.bom[rowData.index] = rowData;  // keep all_done etc. fresh for filters
   const tr = bomBody.children[rowData.index];
   if (!tr) return;
-  tr.children[2].textContent = rowData.placed_count;
-  tr.children[3].textContent = rowData.to_place_count;
-  tr.children[6].innerHTML   = refsHtml(rowData.top_refs);
-  tr.children[7].innerHTML   = refsHtml(rowData.bot_refs);
+  const cb = tr.children[0] ? tr.children[0].querySelector('input.row-checkbox') : null;
+  if (cb) {
+    const isDone = isRowPlaced(rowData);
+    cb.checked = isDone;
+    cb.title = isDone ? 'Mark unplaced' : 'Mark component type as placed';
+  }
+  tr.children[3].textContent = rowData.placed_count;
+  tr.children[4].textContent = getToPlaceCount(rowData);
+  tr.children[7].innerHTML   = refsHtml(rowData.top_refs);
+  tr.children[8].innerHTML   = refsHtml(rowData.bot_refs);
   tr.classList.toggle('row-all-done', rowData.all_done);
-  tr.children[6].classList.toggle('cell-side-done', rowData.top_done && !rowData.all_done);
-  tr.children[7].classList.toggle('cell-side-done', rowData.bot_done && !rowData.all_done);
+  tr.children[7].classList.toggle('cell-side-done', rowData.top_done && !rowData.all_done);
+  tr.children[8].classList.toggle('cell-side-done', rowData.bot_done && !rowData.all_done);
   // Refresh row-all-done cell backgrounds (the CSS rule targets td via row class)
   if (rowData.all_done) {
-    [6, 7].forEach(i => tr.children[i].classList.remove('cell-side-done'));
+    [7, 8].forEach(i => tr.children[i].classList.remove('cell-side-done'));
+  }
+}
+
+async function toggleRowPlaced(idx, placeAll) {
+  const row = state.bom[idx];
+  if (!row) return;
+  const side = state.side;
+  try {
+    const resp = await fetchJson('/api/set_row_placed', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ row: idx, placed: placeAll, side: side }),
+    });
+    if (resp.ok) {
+      if (placeAll) {
+        (resp.placed_desigs || []).forEach(d => state.placed.add(d));
+      } else {
+        (resp.placed_desigs || []).forEach(d => state.placed.delete(d));
+      }
+      if (resp.bom_row) updateBomRow(resp.bom_row);
+      updateMarkers();
+      updateProgress();
+      if (state.hideFitted || searchInput.value.trim()) applyRowFilters();
+      setStatus(`Marked ${row.comment} (${(resp.placed_desigs || []).length} parts) as ${placeAll ? 'placed' : 'unplaced'}`);
+    }
+  } catch (e) {
+    setStatus('Error setting row placed: ' + e.message);
   }
 }
 
@@ -467,9 +608,21 @@ function applyRowFilters() {
   state.bom.forEach((row, idx) => {
     const tr = bomBody.children[idx];
     if (!tr) return;
-    const hide = (state.hideFitted && row.all_done) || (q !== '' && !rowMatchesQuery(row, q));
+    let sideMismatch = false;
+    if (state.sideFilterActive) {
+      if (state.side === 'TOP' && (!row.top_refs || !row.top_refs.length)) {
+        sideMismatch = true;
+      } else if (state.side === 'BOTTOM' && (!row.bot_refs || !row.bot_refs.length)) {
+        sideMismatch = true;
+      }
+    }
+    const isFitted = state.sideFilterActive
+      ? (state.side === 'TOP' ? row.top_done : row.bot_done)
+      : row.all_done;
+    const hide = sideMismatch || (state.hideFitted && isFitted) || (q !== '' && !rowMatchesQuery(row, q));
     tr.style.display = hide ? 'none' : '';
   });
+  updateNavigation();
 }
 
 function selectStep(idx) {
@@ -567,13 +720,38 @@ function applyHighlight() {
   });
 }
 
-// Mirror the board for bottom-side view. Markers and labels live inside the
-// SVG, so they flip along with the components and stay aligned automatically.
-function applySideFlip() {
+// Mirror and rotate the board for current view side and rotation angle.
+// Markers and labels live inside the SVG, so they transform along with the
+// components and stay aligned automatically.
+function applyOrientation() {
   const svg = boardTransform.querySelector('svg');
   if (!svg) return;
   svg.style.transformOrigin = '50% 50%';
-  svg.style.transform = state.side === 'BOTTOM' ? 'scaleX(-1)' : '';
+  const flip = state.side === 'BOTTOM' ? 'scaleX(-1) ' : '';
+  const rot = state.rotation ? `rotate(${state.rotation}deg) ` : '';
+  svg.style.transform = (rot + flip).trim();
+}
+
+function applySideFlip() {
+  applyOrientation();
+}
+
+function rotateCw() {
+  if (!state.loaded) return;
+  state.rotation = (state.rotation + 90) % 360;
+  applyOrientation();
+  if (state.autoZoom && activeDesignators()) fitSelection();
+  else fitView();
+  setStatus(`Board rotated to ${state.rotation}°`);
+}
+
+function rotateCcw() {
+  if (!state.loaded) return;
+  state.rotation = (state.rotation + 270) % 360;
+  applyOrientation();
+  if (state.autoZoom && activeDesignators()) fitSelection();
+  else fitView();
+  setStatus(`Board rotated to ${state.rotation}°`);
 }
 
 // ── Placed / DNP markers + designator labels ──────────────────────────────────
@@ -679,7 +857,11 @@ function identify(desig) {
     if (row.description) msg += ' — ' + row.description;
     msg += `  (row ${idx + 1})`;
     const tr = bomBody.children[idx];
-    if (tr && tr.style.display !== 'none') {
+    if (tr) {
+      if (tr.style.display === 'none') {
+        tr.style.display = '';
+      }
+      selectStep(idx);
       tr.scrollIntoView({ block: 'nearest' });
       tr.classList.remove('flash');
       void tr.offsetWidth;  // restart the CSS animation
@@ -770,7 +952,10 @@ function fitView() {
     svgH = parseFloat(svg.getAttribute('height') || '200');
   }
   if (!svgW || !svgH) return;
-  view.scale = Math.min(cW / svgW, cH / svgH) * 0.95;
+  const isQuarterTurn = (state.rotation === 90 || state.rotation === 270);
+  const boxW = isQuarterTurn ? svgH : svgW;
+  const boxH = isQuarterTurn ? svgW : svgH;
+  view.scale = Math.min(cW / boxW, cH / boxH) * 0.95;
   view.tx    = (cW - svgW * view.scale) / 2;
   view.ty    = (cH - svgH * view.scale) / 2;
   applyTransform();
@@ -779,7 +964,7 @@ function fitView() {
 function fitSelection() {
   const active = activeDesignators();
   if (!active || !state.viewbox) return;
-  const [vbx, vby, vbw] = state.viewbox;
+  const [vbx, vby, vbw, vbh] = state.viewbox;
   const hidden = state.hidden[state.side] || new Set();
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   active.forEach(d => {
@@ -795,7 +980,35 @@ function fitSelection() {
   if (state.side === 'BOTTOM') {  // the svg element is mirrored via CSS
     [ex0, ex1] = [vbw - ex1, vbw - ex0];
   }
-  const ey0 = y0 - vby, ey1 = y1 - vby;
+  let ey0 = y0 - vby, ey1 = y1 - vby;
+
+  if (state.rotation) {
+    const cx = vbw / 2, cy = (vbh || vbw) / 2;
+    const corners = [
+      [ex0, ey0], [ex1, ey0], [ex0, ey1], [ex1, ey1]
+    ];
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    corners.forEach(([x, y]) => {
+      const dx = x - cx, dy = y - cy;
+      let rx, ry;
+      if (state.rotation === 90) {
+        rx = cx - dy; ry = cy + dx;
+      } else if (state.rotation === 180) {
+        rx = cx - dx; ry = cy - dy;
+      } else if (state.rotation === 270) {
+        rx = cx + dy; ry = cy - dx;
+      } else {
+        rx = x; ry = y;
+      }
+      minX = Math.min(minX, rx);
+      maxX = Math.max(maxX, rx);
+      minY = Math.min(minY, ry);
+      maxY = Math.max(maxY, ry);
+    });
+    ex0 = minX; ex1 = maxX;
+    ey0 = minY; ey1 = maxY;
+  }
+
   const pad = Math.max(ex1 - ex0, ey1 - ey0) * 0.15 + 1;
   const rx0 = ex0 - pad, ry0 = ey0 - pad;
   const rw = (ex1 - ex0) + 2 * pad, rh = (ey1 - ey0) + 2 * pad;
@@ -915,10 +1128,26 @@ document.addEventListener('keydown', e => {
     redoToggle();
   } else if ((e.key === 'ArrowDown' || e.key === 'ArrowRight') && !e.ctrlKey) {
     e.preventDefault();
-    if (state.loaded && state.step < state.bom.length - 1) selectStep(state.step + 1);
+    if (state.loaded && state.bom.length) {
+      const start = state.step >= 0 ? state.step + 1 : 0;
+      for (let i = start; i < state.bom.length; i++) {
+        const tr = bomBody.children[i];
+        if (tr && tr.style.display !== 'none') { selectStep(i); break; }
+      }
+    }
   } else if ((e.key === 'ArrowUp' || e.key === 'ArrowLeft') && !e.ctrlKey) {
     e.preventDefault();
-    if (state.loaded && state.step > 0) selectStep(state.step - 1);
+    if (state.loaded && state.bom.length) {
+      const start = state.step > 0 ? state.step - 1 : -1;
+      for (let i = start; i >= 0; i--) {
+        const tr = bomBody.children[i];
+        if (tr && tr.style.display !== 'none') { selectStep(i); break; }
+      }
+    }
+  } else if (key === 'r' && !e.ctrlKey && !e.metaKey) {
+    e.preventDefault();
+    if (e.shiftKey) rotateCcw();
+    else rotateCw();
   } else if (e.key === '0') {
     fitView();
   }

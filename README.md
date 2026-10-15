@@ -49,7 +49,7 @@ Navigate with:
 - **Up / Down arrow keys** (when the BOM table does not have focus)
 - **Clear Selection** to return to the full board view
 
-Selected components show yellow **designator labels** on the board (toggle with the **Labels** button). Use the **filter box** above the BOM to search by designator, name, or description. **Hide Fitted** hides fully-placed rows.
+Selected components show yellow **designator labels** on the board (toggle with the **Labels** button). Use the **filter box** above the BOM to search by designator, name, or description. **Hide Fitted** hides fully-placed rows. Use the **Side Filter** dropdown (**All Sides**, **Current Side**, **Top Side Only**, **Bottom Side Only**) to immediately see only components that belong on the side you are currently working on.
 
 Extra view helpers:
 - **Fit Selection** zooms to the selected row's components; **Auto Zoom** does this automatically on every step.
@@ -98,6 +98,8 @@ The state file is plain JSON containing only the list of placed designators. If 
 | Zoom to selected row | **Fit Selection** button (or **Auto Zoom** toggle) |
 | Identify a component | Single-click it |
 | Mark placed / unplaced | Double-click it (double-tap on touch) |
+| Rotate board 90° CW | **Rotate ↻** button or **R** / **Ctrl+R** |
+| Rotate board 90° CCW | **Rotate ↺** button or **Shift+R** / **Ctrl+Shift+R** |
 | Undo / redo a toggle | **Ctrl+Z** / **Ctrl+Y** |
 
 ---
@@ -125,11 +127,11 @@ The state file is plain JSON containing only the list of placed designators. If 
 |---|---|
 | *(file)* | Open File (with recent-files dropdown), Load .PrjPcb, filename |
 | **Steps** | ◄ Prev, Next ►, step counter |
-| **View** | Fit View, Fit Selection, Auto Zoom, Labels, Clear Selection |
+| **View** | Fit View, Fit Selection, Rotate ↺, Rotate ↻, Auto Zoom, Labels, Silkscreen, Clear Selection, Show DNP |
 | **Config** | Save State, Open State, Auto Save |
 | **Board Side** | Top Side, Bottom Side |
 
-The BOM panel header has a **Hide Fitted** toggle and a **filter box** (matches designators, names, and descriptions). Hovering the Name column shows the component's description.
+The BOM panel header has a **Hide Fitted** toggle, a **filter box** (matches designators, names, and descriptions), **Include SN** and **Include Refs** toggles, and a **Side Filter** dropdown (**All Sides**, **Current Side**, **Top Side Only**, **Bottom Side Only**). Hovering the Name column shows the component's description.
 
 ---
 
@@ -195,7 +197,7 @@ Click **Open PCB** in the toolbar at any time to reload or switch files.
 | File picker | Native OS dialog + recent-files dropdown | Type the full file path (recent paths listed in the dialog) |
 | DNP data | **Load .PrjPcb** button, or auto-loaded from the board's folder | Entered in the load dialog alongside the PCB path |
 | Save / load state | **Save State** / **Open State** buttons, optional **Auto Save** | Auto-saved on every toggle to `<board>.popstate.json` in the same folder |
-| Keyboard shortcuts | ↑ / ↓, **Ctrl+Z / Ctrl+Y** | ↑ ↓ ← → (all four arrows step through BOM), **0** fits the view, **Ctrl+Z / Ctrl+Y** |
+| Keyboard shortcuts | ↑ / ↓, **R / Shift+R**, **Ctrl+Z / Ctrl+Y** | ↑ ↓ ← → (all four arrows step through BOM), **0** fits the view, **R / Shift+R**, **Ctrl+Z / Ctrl+Y** |
 | Touch screens | — | One-finger pan, pinch zoom, tap to identify, double-tap to mark placed |
 
 Everything else — BOM table with search and Hide Fitted, component highlighting, designator labels, click-to-identify, Fit Selection / Auto Zoom, progress indicator, double-click to mark placed, DNP overlays, top/bottom side switching — works identically.
@@ -321,9 +323,9 @@ python main.py "C:\path\to\your\board.PcbDoc"
 
 To build a standalone portable Windows folder (no Python required on target PCs):
 
-1. Install the build dependencies (this also installs the runtime ones):
+1. Install PyInstaller:
    ```powershell
-   pip install -r requirements-build.txt
+   pip install pyinstaller
    ```
 
 2. Run the spec build:
@@ -332,23 +334,3 @@ To build a standalone portable Windows folder (no Python required on target PCs)
    ```
 
 The standalone folder will be generated in `dist/AltiumAssemblyTool/`. Copy this folder to a flash drive or distribute it to end users.
-
-> **Note on `hooks/`** — the build needs `hooks/hook-altium_monkey.py`. `altium_monkey`
-> imports part of its public surface dynamically (`importlib.import_module` over a dict of
-> module names), which PyInstaller's static analysis cannot see, so without that hook the
-> bundle is missing modules and the packaged app fails to open any `.PcbDoc` with
-> `No module named 'altium_monkey.…'`. The spec picks the hook up automatically via
-> `hookspath=['hooks']` — just don't delete the directory.
-
-### Verifying a build
-
-The failure above only appears when a board is actually loaded, so a build that launches
-fine can still be broken. Check the packaged app against a real `.PcbDoc` before shipping:
-
-```powershell
-dist\AltiumAssemblyTool\AltiumAssemblyTool.exe "C:\path\to\board.PcbDoc"
-```
-
-The board should render and the BOM should populate. Testing on a machine with no Python
-and no `altium_monkey` installed is the only way to catch bundling gaps, since a dev
-machine can satisfy imports from its own site-packages.

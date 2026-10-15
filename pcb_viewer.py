@@ -38,6 +38,7 @@ class PcbViewer(QGraphicsView):
         self._renderer: QSvgRenderer | None = None
         self._cumulative_scale: float = 1.0
         self._flipped: bool = False
+        self._rotation: int = 0
         self._press_pos: QPoint | None = None
 
         self.setScene(self._scene)
@@ -70,13 +71,34 @@ class PcbViewer(QGraphicsView):
 
         self._svg_item.setSharedRenderer(self._renderer)
         self._svg_item.update()  # invalidate the device-coordinate cache for the new content
-        self._apply_flip()
+        self._apply_transform()
 
     def set_flip(self, flipped: bool) -> None:
         """Horizontally mirror the board (use for bottom-side view)."""
         self._flipped = flipped
-        self._apply_flip()
+        self._apply_transform()
         QTimer.singleShot(0, self._fit_to_view)
+
+    def set_rotation(self, angle: int) -> None:
+        """Set rotation in degrees (normalized to 0, 90, 180, 270)."""
+        norm = angle % 360
+        if self._rotation == norm:
+            return
+        self._rotation = norm
+        self._apply_transform()
+        QTimer.singleShot(0, self._fit_to_view)
+
+    def rotate_cw(self) -> None:
+        """Rotate 90 degrees clockwise."""
+        self.set_rotation(self._rotation + 90)
+
+    def rotate_ccw(self) -> None:
+        """Rotate 90 degrees counter-clockwise."""
+        self.set_rotation(self._rotation - 90)
+
+    @property
+    def rotation(self) -> int:
+        return self._rotation
 
     def fit_to_view(self) -> None:
         self._fit_to_view()
@@ -89,17 +111,23 @@ class PcbViewer(QGraphicsView):
         self.fitInView(scene_rect, Qt.AspectRatioMode.KeepAspectRatio)
         self._cumulative_scale = 1.0
 
-    def _apply_flip(self) -> None:
+    def _apply_transform(self) -> None:
         if self._svg_item is None:
             return
+        w = self._svg_item.boundingRect().width()
+        h = self._svg_item.boundingRect().height()
+        t = QTransform()
         if self._flipped:
-            w = self._svg_item.boundingRect().width()
-            t = QTransform()
             t.translate(w, 0)
             t.scale(-1, 1)
-            self._svg_item.setTransform(t)
-        else:
-            self._svg_item.setTransform(QTransform())
+        if self._rotation:
+            cx, cy = w / 2.0, h / 2.0
+            t_rot = QTransform()
+            t_rot.translate(cx, cy)
+            t_rot.rotate(self._rotation)
+            t_rot.translate(-cx, -cy)
+            t = t * t_rot
+        self._svg_item.setTransform(t)
         self._scene.setSceneRect(self._svg_item.sceneBoundingRect())
 
     def _fit_to_view(self) -> None:
