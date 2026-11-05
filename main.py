@@ -308,6 +308,7 @@ class MainWindow(QMainWindow):
         self._current_index: int = -1
         self._dnp_view: bool = False  # show every DNP part board-wide (not a single BOM row)
         self._view_side: str = "TOP"
+        self._locate_ref: str | None = None  # a single part pinpointed via Find
         # Each entry: (BomEntry, visible_designators)
         self._active_bom: list[tuple[BomEntry, list[str]]] = []
         self._worker: PcbLoadWorker | None = None
@@ -413,6 +414,17 @@ class MainWindow(QMainWindow):
         self._view_side_group.addButton(self._btn_bottom_view)
         self._view_side_group.setExclusive(True)
 
+        self._locate_box = QLineEdit()
+        self._locate_box.setPlaceholderText("Find part… e.g. IC6")
+        self._locate_box.setClearButtonEnabled(True)
+        self._locate_box.setMaximumWidth(150)
+        self._locate_box.setToolTip(
+            "Type a component designator and press Enter to flip to its side, "
+            "zoom to it, and ring it on the board"
+        )
+        self._btn_locate = QPushButton("Find")
+        self._btn_locate.setToolTip("Locate the entered designator on the board")
+
         def _section(label: str) -> None:
             lbl = QLabel(label)
             lbl.setStyleSheet(
@@ -426,6 +438,10 @@ class MainWindow(QMainWindow):
 
         _section("Steps")
         for w in (self._btn_prev, self._btn_next, self._lbl_step):
+            flow.addWidget(w)
+
+        _section("Find")
+        for w in (self._locate_box, self._btn_locate):
             flow.addWidget(w)
 
         _section("View")
@@ -451,6 +467,8 @@ class MainWindow(QMainWindow):
         self._btn_open_state.setEnabled(False)
         self._btn_top_view.setEnabled(False)
         self._btn_bottom_view.setEnabled(False)
+        self._locate_box.setEnabled(False)
+        self._btn_locate.setEnabled(False)
 
         # Central layout — wrapping toolbar on top, splitter below
         splitter = QSplitter(Qt.Orientation.Vertical)
@@ -555,6 +573,8 @@ class MainWindow(QMainWindow):
         self._viewer.clicked_item.connect(self._on_viewer_click)
         self._btn_top_view.clicked.connect(self._on_view_top)
         self._btn_bottom_view.clicked.connect(self._on_view_bottom)
+        self._locate_box.returnPressed.connect(self._on_locate)
+        self._btn_locate.clicked.connect(self._on_locate)
         self._btn_hide_fitted.toggled.connect(self._apply_row_filters)
         self._search_box.textChanged.connect(self._apply_row_filters)
         self._btn_search_sn.toggled.connect(self._apply_row_filters)
@@ -675,6 +695,7 @@ class MainWindow(QMainWindow):
         self._model = model
         self._current_index = -1
         self._dnp_view = False
+        self._locate_ref = None
         self._btn_dnp_view.blockSignals(True)
         self._btn_dnp_view.setChecked(False)
         self._btn_dnp_view.blockSignals(False)
@@ -698,6 +719,8 @@ class MainWindow(QMainWindow):
         self._btn_open_state.setEnabled(True)
         self._btn_top_view.setEnabled(True)
         self._btn_bottom_view.setEnabled(True)
+        self._locate_box.setEnabled(True)
+        self._btn_locate.setEnabled(True)
         self._btn_top_view.setChecked(True)
         self._update_navigation()
         self._update_progress()
@@ -775,6 +798,7 @@ class MainWindow(QMainWindow):
         if not self._active_bom or row < 0 or row == self._current_index:
             return
         self._exit_dnp_view()
+        self._locate_ref = None
         self._current_index = row
         self._update_navigation()
         self._update_viewer()
@@ -784,6 +808,7 @@ class MainWindow(QMainWindow):
         if self._model is None:
             return
         self._exit_dnp_view()
+        self._locate_ref = None
         self._current_index = -1
         self._bom_table.blockSignals(True)
         self._bom_table.clearSelection()
@@ -807,6 +832,7 @@ class MainWindow(QMainWindow):
         self._dnp_view = checked
         if checked:
             # Whole-board DNP set drives the view — drop any single-row selection.
+            self._locate_ref = None
             self._current_index = -1
             self._bom_table.blockSignals(True)
             self._bom_table.clearSelection()
@@ -1048,6 +1074,80 @@ class MainWindow(QMainWindow):
             (x1 - x0) + 2 * pad, (y1 - y0) + 2 * pad,
         ))
 
+    def _resolve_designator(self, raw: str) -> str | None:
+        """Match a typed string to a real designator, case-insensitively."""
+        if self._model is None:
+            return None
+        s = raw.strip()
+        if not s:
+            return None
+        refs = self._model.all_designators
+        if s in refs:
+            return s
+        up = s.upper()
+        for r in refs:
+            if r.upper() == up:
+                return r
+        return None
+
+    def _zoom_to_ref(self, ref: str) -> None:
+        """Zoom to a single component with context padding around it."""
+        if self._model is None:
+            return
+        b = self._model.component_bounds.get(ref)
+        if b is None:
+            return
+        vx, vy = self._model.viewbox_origin
+        x0, y0, x1, y1 = b
+        pad = max(x1 - x0, y1 - y0) * 0.9 + 3.0
+        self._viewer.zoom_to_item_rect(QRectF(
+            x0 - vx - pad, y0 - vy - pad,
+            (x1 - x0) + 2 * pad, (y1 - y0) + 2 * pad,
+        ))
+
+    def _on_locate(self) -> None:
+        """Find part: flip to the designator's side, zoom to it, and ring it."""
+        if self._model is None:
+            return
+        raw = self._locate_box.text().strip()
+        if not raw:
+            return
+        ref = self._resolve_designator(raw)
+        if ref is None:
+            self.statusBar().showMessage(
+                f"'{raw}' is not a designator on this board", 5000
+            )
+            return
+
+        # A located part stands alone — drop any DNP view or BOM row selection.
+        self._exit_dnp_view()
+        self._current_index = -1
+        self._bom_table.blockSignals(True)
+        self._bom_table.clearSelection()
+        self._bom_table.blockSignals(False)
+        self._update_navigation()
+        self._locate_ref = ref
+
+        side = self._model.designator_side(ref) or "TOP"
+        if side != self._view_side:
+            # Flip via the side buttons so their checked state stays in sync;
+            # the handler re-renders (picking up _locate_ref) and set_flip
+            # queues its own fit-to-view, so defer our zoom to run after it.
+            if side == "BOTTOM":
+                self._btn_bottom_view.setChecked(True)
+                self._on_view_bottom()
+            else:
+                self._btn_top_view.setChecked(True)
+                self._on_view_top()
+        else:
+            self._update_viewer()
+        QTimer.singleShot(0, lambda: self._zoom_to_ref(ref))
+
+        pin_count = len(self._model.pins_for_refdes(ref))
+        self.statusBar().showMessage(
+            f"{ref} — {side} side, {pin_count} pin(s)", 6000
+        )
+
     def _on_auto_zoom_toggled(self, checked: bool) -> None:
         if checked:
             self._zoom_to_selection()
@@ -1161,11 +1261,16 @@ class MainWindow(QMainWindow):
             return
         hide = self._model.hidden_designators_for_side(self._view_side)
         visible = self._active_designators()
+        # A located part only drives the view when nothing else is selected.
+        locate = self._locate_ref if visible is None else None
         show_silk = self._btn_silkscreen.isChecked() if hasattr(self, "_btn_silkscreen") else False
         if visible is not None:
-            svg = self._model.svg_for_designators(set(visible), hide or None, show_silkscreen=show_silk)
+            highlight = set(visible)
+        elif locate is not None:
+            highlight = {locate}
         else:
-            svg = self._model.svg_for_designators(set(), hide or None, show_silkscreen=show_silk)
+            highlight = set()
+        svg = self._model.svg_for_designators(highlight, hide or None, show_silkscreen=show_silk)
         placed = self._placed_visible()
         if placed:
             svg = self._model.add_placed_markers(svg, placed)
@@ -1176,6 +1281,12 @@ class MainWindow(QMainWindow):
             svg = self._model.add_designator_labels(
                 svg, set(visible) - hide, mirrored=(self._view_side == "BOTTOM")
             )
+        elif locate is not None and locate not in hide:
+            svg = self._model.add_designator_labels(
+                svg, {locate}, mirrored=(self._view_side == "BOTTOM")
+            )
+        if locate is not None:
+            svg = self._model.add_locate_marker(svg, locate)
         self._viewer.load_svg(svg)
 
     def _update_navigation(self) -> None:
