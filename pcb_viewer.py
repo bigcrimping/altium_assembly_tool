@@ -4,14 +4,49 @@ pcb_viewer.py — QGraphicsView-based SVG display widget with zoom and pan.
 from __future__ import annotations
 
 from PySide6.QtCore import QByteArray, QPoint, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QPainter, QTransform
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QTransform
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtSvgWidgets import QGraphicsSvgItem
-from PySide6.QtWidgets import QGraphicsItem, QGraphicsScene, QGraphicsView
+from PySide6.QtWidgets import (
+    QGraphicsItem,
+    QGraphicsScene,
+    QGraphicsSimpleTextItem,
+    QGraphicsView,
+)
 
 _ZOOM_FACTOR = 1.15
 _ZOOM_MIN = 0.02
 _ZOOM_MAX = 80.0
+
+# Net-label screen sizing (pixels, independent of zoom).
+_LABEL_MIN_PX = 7.0    # below this a label is hidden until you zoom in further
+_LABEL_MAX_PX = 15.0   # cap so labels never dominate when zoomed way in
+_LABEL_COLOR = "#ffffff"
+
+
+class _PinLabel(QGraphicsSimpleTextItem):
+    """A net-name label that keeps a constant on-screen size and centres on its
+    pad. ItemIgnoresTransformations detaches the glyph size from the view zoom;
+    the owner resizes/hides it per zoom so it always fits inside the pad."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self.setBrush(QBrush(QColor(_LABEL_COLOR)))
+        font = QFont("Segoe UI")
+        font.setStyleHint(QFont.StyleHint.SansSerif)
+        self.setFont(font)
+        self.setZValue(1000)
+
+    def boundingRect(self) -> QRectF:
+        br = super().boundingRect()
+        return br.translated(-br.width() / 2, -br.height() / 2)
+
+    def paint(self, painter, option, widget=None) -> None:
+        br = super().boundingRect()
+        painter.translate(-br.width() / 2, -br.height() / 2)
+        super().paint(painter, option, widget)
 
 
 class PcbViewer(QGraphicsView):
@@ -39,6 +74,9 @@ class PcbViewer(QGraphicsView):
         self._cumulative_scale: float = 1.0
         self._flipped: bool = False
         self._press_pos: QPoint | None = None
+        # Zoom-aware net labels: each entry is (_PinLabel, pad_w, pad_h, side).
+        self._pin_labels: list[tuple[_PinLabel, float, float, str]] = []
+        self._pin_labels_enabled: bool = False
 
         self.setScene(self._scene)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
@@ -88,6 +126,59 @@ class PcbViewer(QGraphicsView):
         scene_rect = self._svg_item.mapRectToScene(rect)
         self.fitInView(scene_rect, Qt.AspectRatioMode.KeepAspectRatio)
         self._cumulative_scale = 1.0
+        self._update_pin_labels()
+
+    # ------------------------------------------------------------------
+    # Zoom-aware net labels
+    # ------------------------------------------------------------------
+
+    def set_pin_labels(self, specs: list[tuple[str, float, float, float, float, str]]) -> None:
+        """Install net-name labels. Each spec is
+        (text, x, y, pad_w, pad_h, side) in SVG-item coordinates."""
+        for item, *_ in self._pin_labels:
+            item.setParentItem(None)
+            self._scene.removeItem(item)
+        self._pin_labels = []
+        if self._svg_item is None:
+            return
+        for text, x, y, w, h, side in specs:
+            item = _PinLabel(text)
+            item.setParentItem(self._svg_item)
+            item.setPos(x, y)
+            item.setVisible(False)
+            self._pin_labels.append((item, w, h, side))
+        self._update_pin_labels()
+
+    def set_pin_labels_enabled(self, enabled: bool) -> None:
+        self._pin_labels_enabled = bool(enabled)
+        self._update_pin_labels()
+
+    def _update_pin_labels(self) -> None:
+        """Resize/show/hide each label from the pad's current on-screen size."""
+        if not self._pin_labels:
+            return
+        enabled = self._pin_labels_enabled
+        side_now = "BOTTOM" if self._flipped else "TOP"
+        scale = abs(self.transform().m11())  # device px per scene unit (mm)
+        for item, w, h, side in self._pin_labels:
+            if not enabled or (side != side_now and side != "BOTH"):
+                item.setVisible(False)
+                continue
+            pad_w_px = w * scale
+            pad_h_px = h * scale
+            n = max(len(item.text()), 1)
+            # Largest pixel size that still fits the pad in both axes (0.58 is an
+            # approximate average glyph width / height ratio for sans-serif).
+            fit_w = (pad_w_px * 0.92) / (n * 0.58)
+            fit_h = pad_h_px * 0.78
+            px = min(fit_w, fit_h, _LABEL_MAX_PX)
+            if px < _LABEL_MIN_PX:
+                item.setVisible(False)
+            else:
+                font = item.font()
+                font.setPixelSize(max(1, round(px)))
+                item.setFont(font)
+                item.setVisible(True)
 
     def _apply_flip(self) -> None:
         if self._svg_item is None:
@@ -110,6 +201,7 @@ class PcbViewer(QGraphicsView):
         rect = self._svg_item.sceneBoundingRect()
         self._scene.setSceneRect(rect)
         self.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
+        self._update_pin_labels()
 
     # ------------------------------------------------------------------
     # Event overrides
@@ -130,6 +222,7 @@ class PcbViewer(QGraphicsView):
         if _ZOOM_MIN <= new_scale <= _ZOOM_MAX:
             self._cumulative_scale = new_scale
             self.scale(factor, factor)
+            self._update_pin_labels()
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
