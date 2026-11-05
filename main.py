@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSplitter,
+    QStackedWidget,
     QStyle,
     QStyledItemDelegate,
     QTableWidget,
@@ -283,6 +284,9 @@ class FlowLayout(QLayout):
         y = effective.y()
         line_height = 0
         for item in self._items:
+            w = item.widget()
+            if w is not None and w.isHidden():
+                continue  # mode-hidden controls take no space and leave no gap
             item_size = item.sizeHint()
             next_x = x + item_size.width() + self._hspace
             if next_x - self._hspace > effective.right() and line_height > 0:
@@ -309,6 +313,12 @@ class MainWindow(QMainWindow):
         self._dnp_view: bool = False  # show every DNP part board-wide (not a single BOM row)
         self._view_side: str = "TOP"
         self._locate_ref: str | None = None  # a single part pinpointed via Find
+        self._mode: str = "assembly"          # "assembly" | "reader"
+        self._selected_net: str | None = None  # the net highlighted in board-reader
+        self._net_rows: list[str] = []          # net name per reader-table row
+        # True right after currentCellChanged already (de)selected a net, so the
+        # following cellClicked on the same click does not immediately toggle it.
+        self._net_click_guard: bool = False
         # Each entry: (BomEntry, visible_designators)
         self._active_bom: list[tuple[BomEntry, list[str]]] = []
         self._worker: PcbLoadWorker | None = None
@@ -425,38 +435,101 @@ class MainWindow(QMainWindow):
         self._btn_locate = QPushButton("Find")
         self._btn_locate.setToolTip("Locate the entered designator on the board")
 
-        def _section(label: str) -> None:
+        # Mode toggle — swaps the whole control set between the assembly
+        # stepper and the board-reader (net/probe-point) explorer.
+        self._btn_assembly = QPushButton("Assembly")
+        self._btn_assembly.setCheckable(True)
+        self._btn_assembly.setChecked(True)
+        self._btn_assembly.setStyleSheet(_SIDE_BTN_STYLE)
+        self._btn_assembly.setToolTip("Assembly stepper: BOM, placement tracking, DNP")
+        self._btn_reader = QPushButton("Board Reader")
+        self._btn_reader.setCheckable(True)
+        self._btn_reader.setStyleSheet(_SIDE_BTN_STYLE)
+        self._btn_reader.setToolTip("Board reader: explore nets and probe points")
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.addButton(self._btn_assembly)
+        self._mode_group.addButton(self._btn_reader)
+        self._mode_group.setExclusive(True)
+
+        self._btn_all_labels = QPushButton("All Labels")
+        self._btn_all_labels.setCheckable(True)
+        self._btn_all_labels.setStyleSheet(_SIDE_BTN_STYLE)
+        self._btn_all_labels.setToolTip("Label every component on the visible side")
+
+        self._btn_copper = QPushButton("Copper")
+        self._btn_copper.setCheckable(True)
+        self._btn_copper.setStyleSheet(_SIDE_BTN_STYLE)
+        self._btn_copper.setToolTip(
+            "Show this side's copper tracks, vias, and pours. Selecting a net "
+            "lights up its routing so you can trace connectivity."
+        )
+
+        self._btn_net_names = QPushButton("Net Names")
+        self._btn_net_names.setCheckable(True)
+        self._btn_net_names.setStyleSheet(_SIDE_BTN_STYLE)
+        self._btn_net_names.setToolTip("Label every pad on the visible side with its net name")
+
+        # Each control is tagged with the mode(s) it belongs to; _apply_mode_visibility
+        # shows/hides them (and the FlowLayout reflows around the hidden ones).
+        BOTH = {"assembly", "reader"}
+        ASSY = {"assembly"}
+        READ = {"reader"}
+        self._toolbar_modes: list[tuple[QWidget, set[str]]] = []
+
+        def _add(widget: QWidget, modes: set[str] = BOTH) -> None:
+            self._toolbar_modes.append((widget, modes))
+            flow.addWidget(widget)
+
+        def _section(label: str, modes: set[str] = BOTH) -> None:
             lbl = QLabel(label)
             lbl.setStyleSheet(
                 "QLabel { color: #999; font-size: 9px; font-weight: bold;"
                 " padding: 0 4px 0 6px; }"
             )
-            flow.addWidget(lbl)
+            _add(lbl, modes)
 
-        for w in (self._btn_open, self._btn_load_prjpcb, self._combo_variant, self._lbl_filename):
-            flow.addWidget(w)
+        _add(self._btn_open)
+        _add(self._btn_load_prjpcb, ASSY)
+        _add(self._combo_variant, ASSY)
+        _add(self._lbl_filename)
 
-        _section("Steps")
+        _section("Mode")
+        _add(self._btn_assembly)
+        _add(self._btn_reader)
+
+        _section("Steps", ASSY)
         for w in (self._btn_prev, self._btn_next, self._lbl_step):
-            flow.addWidget(w)
+            _add(w, ASSY)
 
         _section("Find")
-        for w in (self._locate_box, self._btn_locate):
-            flow.addWidget(w)
+        _add(self._locate_box)
+        _add(self._btn_locate)
 
         _section("View")
-        for w in (self._btn_fit, self._btn_fit_sel, self._btn_auto_zoom, self._btn_labels,
-                  self._btn_silkscreen, self._btn_clear, self._btn_dnp_view):
-            flow.addWidget(w)
+        _add(self._btn_fit)
+        _add(self._btn_fit_sel, ASSY)
+        _add(self._btn_auto_zoom, ASSY)
+        _add(self._btn_labels, ASSY)
+        _add(self._btn_all_labels, READ)
+        _add(self._btn_copper, READ)
+        _add(self._btn_net_names, READ)
+        _add(self._btn_silkscreen)
+        _add(self._btn_clear)
+        _add(self._btn_dnp_view, ASSY)
 
-        _section("Config")
+        _section("Config", ASSY)
         for w in (self._btn_save_state, self._btn_open_state, self._btn_auto_save):
-            flow.addWidget(w)
+            _add(w, ASSY)
 
         _section("Board Side")
-        for w in (self._btn_top_view, self._btn_bottom_view):
-            flow.addWidget(w)
+        _add(self._btn_top_view)
+        _add(self._btn_bottom_view)
 
+        self._btn_assembly.setEnabled(False)
+        self._btn_reader.setEnabled(False)
+        self._btn_all_labels.setEnabled(False)
+        self._btn_copper.setEnabled(False)
+        self._btn_net_names.setEnabled(False)
         self._btn_prev.setEnabled(False)
         self._btn_next.setEnabled(False)
         self._btn_fit.setEnabled(False)
@@ -545,11 +618,50 @@ class MainWindow(QMainWindow):
         self._bom_table.setItemDelegateForColumn(7, _html_delegate)
         bottom_layout.addWidget(self._bom_table)
 
+        # Board-reader bottom panel — the net list (stacked behind the BOM panel).
+        reader_widget = QWidget()
+        reader_layout = QVBoxLayout(reader_widget)
+        reader_layout.setContentsMargins(4, 4, 4, 4)
+        reader_header = QHBoxLayout()
+        reader_header.setContentsMargins(0, 0, 0, 0)
+        reader_header.addWidget(QLabel("Nets"))
+        self._net_filter_box = QLineEdit()
+        self._net_filter_box.setPlaceholderText("Filter nets… e.g. VSYS")
+        self._net_filter_box.setClearButtonEnabled(True)
+        self._net_filter_box.setMaximumWidth(280)
+        reader_header.addWidget(self._net_filter_box)
+        self._lbl_net_count = QLabel("")
+        reader_header.addWidget(self._lbl_net_count)
+        self._btn_clear_nets = QPushButton("Clear Nets")
+        self._btn_clear_nets.setToolTip("Deselect the highlighted net")
+        reader_header.addWidget(self._btn_clear_nets)
+        reader_header.addStretch(1)
+        reader_layout.addLayout(reader_header)
+
+        self._net_table = QTableWidget(0, 2)
+        self._net_table.setHorizontalHeaderLabels(["Net", "Pins"])
+        nhdr = self._net_table.horizontalHeader()
+        nhdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        nhdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self._net_table.verticalHeader().setVisible(False)
+        self._net_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._net_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._net_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._net_table.setAlternatingRowColors(True)
+        reader_layout.addWidget(self._net_table)
+
+        self._bottom_stack = QStackedWidget()
+        self._bottom_stack.addWidget(bottom_widget)   # index 0 — assembly
+        self._bottom_stack.addWidget(reader_widget)   # index 1 — reader
+
         splitter.addWidget(self._viewer)
-        splitter.addWidget(bottom_widget)
+        splitter.addWidget(self._bottom_stack)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([650, 250])
+        # Bottom panel ~15% shorter than before (250 → 212) for more board view.
+        splitter.setSizes([688, 212])
+
+        self._apply_mode_visibility()
 
         self._lbl_progress = QLabel("")
         self.statusBar().addPermanentWidget(self._lbl_progress)
@@ -575,6 +687,17 @@ class MainWindow(QMainWindow):
         self._btn_bottom_view.clicked.connect(self._on_view_bottom)
         self._locate_box.returnPressed.connect(self._on_locate)
         self._btn_locate.clicked.connect(self._on_locate)
+        self._btn_assembly.clicked.connect(lambda: self._on_mode_changed("assembly"))
+        self._btn_reader.clicked.connect(lambda: self._on_mode_changed("reader"))
+        self._btn_all_labels.toggled.connect(lambda _checked: self._update_viewer())
+        self._btn_copper.toggled.connect(lambda _checked: self._update_viewer())
+        self._btn_net_names.toggled.connect(lambda _checked: self._sync_net_labels())
+        self._net_table.currentCellChanged.connect(
+            lambda row, *_: self._on_net_row_changed(row)
+        )
+        self._net_table.cellClicked.connect(self._on_net_cell_clicked)
+        self._btn_clear_nets.clicked.connect(self._clear_net_selection)
+        self._net_filter_box.textChanged.connect(self._filter_net_list)
         self._btn_hide_fitted.toggled.connect(self._apply_row_filters)
         self._search_box.textChanged.connect(self._apply_row_filters)
         self._btn_search_sn.toggled.connect(self._apply_row_filters)
@@ -696,6 +819,18 @@ class MainWindow(QMainWindow):
         self._current_index = -1
         self._dnp_view = False
         self._locate_ref = None
+        self._selected_net = None
+        self._mode = "assembly"
+        self._btn_assembly.blockSignals(True)
+        self._btn_assembly.setChecked(True)
+        self._btn_assembly.blockSignals(False)
+        # Board-reader defaults: copper + net names on.
+        for btn in (self._btn_copper, self._btn_net_names):
+            btn.blockSignals(True)
+            btn.setChecked(True)
+            btn.blockSignals(False)
+        self._bottom_stack.setCurrentIndex(0)
+        self._apply_mode_visibility()
         self._btn_dnp_view.blockSignals(True)
         self._btn_dnp_view.setChecked(False)
         self._btn_dnp_view.blockSignals(False)
@@ -710,6 +845,8 @@ class MainWindow(QMainWindow):
         self._rebuild_active_bom()
         self._viewer.set_flip(False)
         self._update_viewer()
+        self._viewer.set_pin_labels(self._build_pin_label_specs())
+        self._sync_net_labels()
         QTimer.singleShot(0, self._viewer.fit_to_view)
         self._btn_fit.setEnabled(True)
         self._btn_fit_sel.setEnabled(True)
@@ -721,6 +858,12 @@ class MainWindow(QMainWindow):
         self._btn_bottom_view.setEnabled(True)
         self._locate_box.setEnabled(True)
         self._btn_locate.setEnabled(True)
+        self._btn_assembly.setEnabled(True)
+        self._btn_reader.setEnabled(True)
+        self._btn_all_labels.setEnabled(True)
+        self._btn_copper.setEnabled(True)
+        self._btn_net_names.setEnabled(True)
+        self._populate_net_list()
         self._btn_top_view.setChecked(True)
         self._update_navigation()
         self._update_progress()
@@ -1119,13 +1262,18 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # A located part stands alone — drop any DNP view or BOM row selection.
+        # A located part stands alone — drop any DNP view, BOM row, or net selection.
         self._exit_dnp_view()
         self._current_index = -1
         self._bom_table.blockSignals(True)
         self._bom_table.clearSelection()
         self._bom_table.blockSignals(False)
         self._update_navigation()
+        if self._selected_net is not None:
+            self._selected_net = None
+            self._net_table.blockSignals(True)
+            self._net_table.clearSelection()
+            self._net_table.blockSignals(False)
         self._locate_ref = ref
 
         side = self._model.designator_side(ref) or "TOP"
@@ -1168,6 +1316,9 @@ class MainWindow(QMainWindow):
     def _on_viewer_click(self, item_x: float, item_y: float) -> None:
         """Single click on the board: identify the component in the status bar + BOM."""
         if self._model is None:
+            return
+        if self._mode == "reader":
+            self._on_reader_click(item_x, item_y)
             return
         hidden = self._model.hidden_designators_for_side(self._view_side)
         vx, vy = self._model.viewbox_origin
@@ -1259,6 +1410,9 @@ class MainWindow(QMainWindow):
     def _update_viewer(self) -> None:
         if self._model is None:
             return
+        if self._mode == "reader":
+            self._update_reader_viewer()
+            return
         hide = self._model.hidden_designators_for_side(self._view_side)
         visible = self._active_designators()
         # A located part only drives the view when nothing else is selected.
@@ -1288,6 +1442,236 @@ class MainWindow(QMainWindow):
         if locate is not None:
             svg = self._model.add_locate_marker(svg, locate)
         self._viewer.load_svg(svg)
+
+    # ------------------------------------------------------------------
+    # Board-reader mode
+    # ------------------------------------------------------------------
+
+    def _apply_mode_visibility(self) -> None:
+        for widget, modes in self._toolbar_modes:
+            widget.setVisible(self._mode in modes)
+
+    def _on_mode_changed(self, mode: str) -> None:
+        if self._model is None or mode == self._mode:
+            return
+        self._mode = mode
+        self._locate_ref = None
+        if mode == "reader":
+            self._exit_dnp_view()
+            self._current_index = -1
+            self._bom_table.blockSignals(True)
+            self._bom_table.clearSelection()
+            self._bom_table.blockSignals(False)
+            self._update_navigation()
+            self._bottom_stack.setCurrentIndex(1)
+        else:
+            self._selected_net = None
+            self._net_table.blockSignals(True)
+            self._net_table.clearSelection()
+            self._net_table.blockSignals(False)
+            self._bottom_stack.setCurrentIndex(0)
+        self._apply_mode_visibility()
+        self._sync_net_labels()
+        self._update_viewer()
+        QTimer.singleShot(0, self._viewer.fit_to_view)
+
+    def _populate_net_list(self) -> None:
+        if self._model is None:
+            return
+        names = self._model.net_names
+        self._net_rows = names
+        self._net_table.blockSignals(True)
+        self._net_table.setRowCount(len(names))
+        for row, name in enumerate(names):
+            item_name = QTableWidgetItem(name)
+            item_pins = QTableWidgetItem(str(len(self._model.net_pins(name))))
+            item_pins.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._net_table.setItem(row, 0, item_name)
+            self._net_table.setItem(row, 1, item_pins)
+        self._net_table.blockSignals(False)
+        self._filter_net_list()
+
+    def _filter_net_list(self, *_args) -> None:
+        q = self._net_filter_box.text().strip().lower()
+        shown = 0
+        for row, name in enumerate(self._net_rows):
+            hidden = bool(q) and q not in name.lower()
+            self._net_table.setRowHidden(row, hidden)
+            if not hidden:
+                shown += 1
+        total = len(self._net_rows)
+        self._lbl_net_count.setText(
+            f"{shown} / {total} nets" if q else f"{total} nets"
+        )
+
+    def _on_net_row_changed(self, row: int) -> None:
+        if self._model is None or row < 0 or row >= len(self._net_rows):
+            return
+        self._select_net(self._net_rows[row], from_table=True)
+        # A row-change came from this click/keypress; the paired cellClicked must
+        # not read it as a re-click and toggle it straight back off.
+        self._net_click_guard = True
+
+    def _on_net_cell_clicked(self, row: int, _col: int) -> None:
+        """Click the already-selected net to deselect it (toggle)."""
+        if self._net_click_guard:
+            self._net_click_guard = False
+            return  # this click already selected a new row via currentCellChanged
+        if self._model is None or row < 0 or row >= len(self._net_rows):
+            return
+        net = self._net_rows[row]
+        if net == self._selected_net:
+            self._clear_net_selection()
+        else:
+            self._select_net(net, from_table=True)
+
+    def _clear_net_selection(self) -> None:
+        """Deselect the highlighted net and return to the plain board view."""
+        if self._model is None:
+            return
+        self._selected_net = None
+        self._net_click_guard = False
+        self._net_table.blockSignals(True)
+        self._net_table.clearSelection()
+        self._net_table.setCurrentCell(-1, -1)
+        self._net_table.blockSignals(False)
+        self._update_viewer()
+
+    def _select_net(self, name: str, *, from_table: bool = False) -> None:
+        if self._model is None:
+            return
+        self._selected_net = name
+        self._locate_ref = None
+        if not from_table:
+            try:
+                idx = self._net_rows.index(name)
+            except ValueError:
+                idx = -1
+            if idx >= 0:
+                self._net_table.blockSignals(True)
+                self._net_table.selectRow(idx)
+                self._net_table.scrollToItem(self._net_table.item(idx, 0))
+                self._net_table.blockSignals(False)
+        self._update_viewer()
+        self._zoom_to_net(name)
+        pins = self._model.net_pins(name)
+        preview = ", ".join(p.pin_name for p in pins[:12])
+        self.statusBar().showMessage(
+            f"Net {name} — {len(pins)} pin(s): {preview}"
+            + ("…" if len(pins) > 12 else ""),
+            8000,
+        )
+
+    def _reader_visible_pins(self, name: str) -> list:
+        """Net pins whose component is shown on the current side."""
+        if self._model is None:
+            return []
+        hide = self._model.hidden_designators_for_side(self._view_side)
+        return [p for p in self._model.net_pins(name) if p.refdes not in hide]
+
+    def _update_reader_viewer(self) -> None:
+        if self._model is None:
+            return
+        hide = self._model.hidden_designators_for_side(self._view_side)
+        show_silk = self._btn_silkscreen.isChecked()
+        mirrored = self._view_side == "BOTTOM"
+        copper_side = self._view_side if self._btn_copper.isChecked() else None
+        net = self._selected_net
+        locate = self._locate_ref if net is None else None
+
+        if net:
+            pins = self._reader_visible_pins(net)
+            touched = {p.refdes for p in pins}
+            svg = self._model.svg_for_designators(
+                touched, hide or None, show_silkscreen=show_silk,
+                copper_side=copper_side, highlight_net=net,
+            )
+            svg = self._model.add_net_pad_markers(svg, pins, label=True, mirrored=mirrored)
+        elif locate is not None:
+            svg = self._model.svg_for_designators(
+                {locate}, hide or None, show_silkscreen=show_silk, copper_side=copper_side,
+            )
+        else:
+            svg = self._model.svg_for_designators(
+                set(), hide or None, show_silkscreen=show_silk, copper_side=copper_side,
+            )
+
+        if self._btn_all_labels.isChecked():
+            svg = self._model.add_designator_labels(
+                svg, self._model.all_designators - hide, mirrored=mirrored
+            )
+        elif locate is not None and locate not in hide:
+            svg = self._model.add_designator_labels(svg, {locate}, mirrored=mirrored)
+
+        if locate is not None:
+            svg = self._model.add_locate_marker(svg, locate)
+        self._viewer.load_svg(svg)
+
+    def _build_pin_label_specs(self) -> list[tuple[str, float, float, float, float, str]]:
+        """Net-name label specs in SVG-item coords: (net, x, y, w, h, side)."""
+        if self._model is None:
+            return []
+        vx, vy = self._model.viewbox_origin
+        specs: list[tuple[str, float, float, float, float, str]] = []
+        for refdes in self._model.all_designators:
+            for p in self._model.pins_for_refdes(refdes):
+                if not p.net or p.bounds is None:
+                    continue
+                x0, y0, x1, y1 = p.bounds
+                specs.append((
+                    p.net,
+                    (x0 + x1) / 2 - vx,
+                    (y0 + y1) / 2 - vy,
+                    x1 - x0,
+                    y1 - y0,
+                    p.side,
+                ))
+        return specs
+
+    def _sync_net_labels(self) -> None:
+        """Enable the viewer's zoom-aware net labels only in reader mode."""
+        on = self._mode == "reader" and self._btn_net_names.isChecked()
+        self._viewer.set_pin_labels_enabled(on)
+
+    def _zoom_to_net(self, name: str) -> None:
+        if self._model is None:
+            return
+        boxes = [p.bounds for p in self._reader_visible_pins(name) if p.bounds is not None]
+        if not boxes:
+            return
+        x0 = min(b[0] for b in boxes)
+        y0 = min(b[1] for b in boxes)
+        x1 = max(b[2] for b in boxes)
+        y1 = max(b[3] for b in boxes)
+        vx, vy = self._model.viewbox_origin
+        pad = max(x1 - x0, y1 - y0) * 0.2 + 2.0
+        self._viewer.zoom_to_item_rect(QRectF(
+            x0 - vx - pad, y0 - vy - pad,
+            (x1 - x0) + 2 * pad, (y1 - y0) + 2 * pad,
+        ))
+
+    def _on_reader_click(self, item_x: float, item_y: float) -> None:
+        """Board click in reader mode: resolve the pad under the cursor to its net."""
+        if self._model is None:
+            return
+        vx, vy = self._model.viewbox_origin
+        x, y = item_x + vx, item_y + vy
+        hide = self._model.hidden_designators_for_side(self._view_side)
+        pin = self._model.pin_at_svg(x, y)
+        if pin is not None and pin[0] in hide:
+            pin = None
+        if pin is None:
+            desig = self._model.component_at_svg(x, y, exclude=set(hide))
+            if desig is not None:
+                pin = self._model.nearest_pin_of(desig, x, y)
+        if pin is None:
+            return
+        refdes, pad = pin
+        net = next((p.net for p in self._model.pins_for_refdes(refdes) if p.pad == pad), "")
+        if net:
+            self._select_net(net)
+        else:
+            self.statusBar().showMessage(f"{refdes}-{pad} — no connected net", 5000)
 
     def _update_navigation(self) -> None:
         if self._model is None:

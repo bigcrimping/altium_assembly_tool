@@ -4,6 +4,7 @@ No Qt imports. All altium_monkey interaction lives here.
 """
 from __future__ import annotations
 
+import copy
 import html
 import re
 import xml.etree.ElementTree as ET
@@ -23,6 +24,8 @@ SELECT_HIGHLIGHT_COLOR = "#56B4E9"  # sky blue — the selected BOM row's compon
 PLACED_MARKER_COLOR    = "#009E73"  # bluish green — placed
 DNP_MARKER_COLOR       = "#D55E00"  # vermillion — DNP / no-fit
 LOCATE_MARKER_COLOR    = "#CC79A7"  # reddish purple — the refdes located by search
+NET_PAD_MARKER_COLOR   = "#E69F00"  # orange — pads on the net selected in board-reader
+COPPER_BASE_COLOR      = "#C0392B"  # red — copper tracks/pours in the reader view
 
 # ComponentKind values to exclude from assembly BOM
 _BOM_EXCLUDE_KIND_VALUES = frozenset({1, 2, 4, 5})
@@ -102,6 +105,10 @@ class PcbModel:
         self._pins_by_refdes: dict[str, list[PinInfo]] = {}    # refdes → pins
         self._pin_bounds: dict[tuple[str, str], tuple[float, float, float, float]] = {}
         self._net_name_lookup: dict[str, str] = {}             # lower(name) → name
+        self._copper_elems: list[ET.Element] = []              # tagged outer-layer copper
+        self._pin1_elems: list[ET.Element] = []                # pads carrying the pin-1 stripe
+        # (refdes, pad) → representative copper pad element (for shaped markers)
+        self._pad_shape_elem: dict[tuple[str, str], ET.Element] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -300,9 +307,14 @@ class PcbModel:
         designators: set[str],
         hide_designators: set[str] | None = None,
         show_silkscreen: bool = False,
+        copper_side: str | None = None,
+        highlight_net: str | None = None,
     ) -> str:
         """Return the base SVG with the selected designators recoloured to the
         highlight colour, every other component dimmed, and hide_designators hidden.
+
+        copper_side: when "TOP"/"BOTTOM", reveal that side's copper (faint), with
+        highlight_net's tracks boosted and recoloured so a net's routing stands out.
         """
         if self._root is None:
             return self._base_svg
@@ -314,6 +326,28 @@ class PcbModel:
                     if "silkscreen-element" in (elem.get("class") or ""):
                         self._override(elem, "display", "inline", touched)
                         self._override(elem, "opacity", "0.75", touched)
+
+            if copper_side:
+                # Board reader: drop the pin-1 diagonal stripe so every pad reads
+                # as one uniform colour (restore each pad's original solid fill).
+                for elem in self._pin1_elems:
+                    orig = elem.get("data-pin1-orig-fill")
+                    if orig is not None:
+                        self._override(elem, "fill", orig, touched)
+                for elem in self._copper_elems:
+                    if elem.get("data-copper-side") != copper_side:
+                        continue
+                    self._override(elem, "display", "inline", touched)
+                    if highlight_net and elem.get("data-net") == highlight_net:
+                        self._override(elem, "opacity", "1", touched)
+                        self._recolor(elem, NET_PAD_MARKER_COLOR, touched)
+                    else:
+                        # Recolour pours (black fill) and tracks (red stroke) to a
+                        # single copper tone. Full opacity so overlapping pours do
+                        # not stack into brighter patches — the copper reads as one
+                        # uniform colour.
+                        self._override(elem, "opacity", "1", touched)
+                        self._recolor(elem, COPPER_BASE_COLOR, touched)
 
             if designators or hide:
                 for desig, elems in self._comp_elems.items():
@@ -479,6 +513,12 @@ class PcbModel:
         self._comp_elems = _index_component_elements(root)
         self._component_svg_bounds, self._instance_bounds = _compute_bounds(self._comp_elems)
         self._build_netlist(root)
+        self._copper_elems = [
+            e for e in root.iter() if "copper-element" in (e.get("class") or "")
+        ]
+        self._pin1_elems = [
+            e for e in root.iter() if e.get("data-pin1-orig-fill") is not None
+        ]
         self._root = root
         self._base_svg = ET.tostring(root, encoding="unicode", xml_declaration=False)
 
@@ -551,7 +591,10 @@ class PcbModel:
                 continue  # ignore paste/soldermask apertures; copper is what we probe
             net = (elem.get("data-net") or "").strip()
             layer_name = (elem.get("data-layer-name") or "").upper()
-            rec = acc.setdefault((refdes, pad), {"net": net, "sides": set(), "boxes": []})
+            rec = acc.setdefault(
+                (refdes, pad),
+                {"net": net, "sides": set(), "boxes": [], "elem": None, "area": -1.0},
+            )
             if net and not rec["net"]:
                 rec["net"] = net
             if layer_name.startswith("TOP"):
@@ -561,6 +604,10 @@ class PcbModel:
             box = _element_bounds(elem)
             if box is not None:
                 rec["boxes"].append(box)
+                area = (box[2] - box[0]) * (box[3] - box[1])
+                if area > rec["area"]:
+                    rec["area"] = area
+                    rec["elem"] = elem  # largest copper element = the pad land
 
         net_pins: dict[str, list[PinInfo]] = {}
         pins_by_refdes: dict[str, list[PinInfo]] = {}
@@ -600,6 +647,9 @@ class PcbModel:
         self._pins_by_refdes = pins_by_refdes
         self._pin_bounds = pin_bounds
         self._net_name_lookup = {name.lower(): name for name in net_pins}
+        self._pad_shape_elem = {
+            key: rec["elem"] for key, rec in acc.items() if rec["elem"] is not None
+        }
 
     # ------------------------------------------------------------------
     # Net / pin public API
@@ -653,6 +703,144 @@ class PcbModel:
             max(b[3] for b in boxes),
         )
 
+    def pin_at_svg(self, x: float, y: float) -> tuple[str, str] | None:
+        """Return the (refdes, pad) whose pad bbox contains (x, y), smallest wins.
+
+        Coordinates are in the same space as component_bounds / component_at_svg.
+        """
+        best: tuple[str, str] | None = None
+        best_area: float | None = None
+        for key, (x0, y0, x1, y1) in self._pin_bounds.items():
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                area = (x1 - x0) * (y1 - y0)
+                if best_area is None or area < best_area:
+                    best_area = area
+                    best = key
+        return best
+
+    def nearest_pin_of(self, refdes: str, x: float, y: float) -> tuple[str, str] | None:
+        """Pad of a component whose centre is closest to (x, y) — a click fallback."""
+        pins = self._pins_by_refdes.get(refdes)
+        if not pins:
+            return None
+        best: tuple[str, str] | None = None
+        best_d: float | None = None
+        for p in pins:
+            if p.bounds is None:
+                continue
+            cx = (p.bounds[0] + p.bounds[2]) / 2
+            cy = (p.bounds[1] + p.bounds[3]) / 2
+            d = (cx - x) ** 2 + (cy - y) ** 2
+            if best_d is None or d < best_d:
+                best_d = d
+                best = (p.refdes, p.pad)
+        return best
+
+    def add_net_pad_markers(
+        self,
+        svg: str,
+        pins: list[PinInfo],
+        label: bool = True,
+        mirrored: bool = False,
+    ) -> str:
+        """Ring every pad in `pins` and (optionally) label it with its pin name.
+
+        Used by board-reader mode to pinpoint the probe points on a net.
+        """
+        base = self._LABEL_FONT_PX
+        frags: list[str] = []
+        for p in pins:
+            if p.bounds is None:
+                continue
+            x0, y0, x1, y1 = p.bounds
+            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+            w, h = x1 - x0, y1 - y0
+            attr = html.escape(p.pin_name, quote=True)
+            frags.append(self._pad_marker_fragment(p.refdes, p.pad, cx, cy, w, h, attr))
+            if label:
+                size = max(min(max(w, h) * 0.6, 1.3), 0.55)
+                s = size / base
+                sx = -s if mirrored else s
+                # Sit the pin-name label just above the expanded pad outline.
+                ly = cy - (max(w, h) * 0.5 * self._MARKER_EXPAND) - size * 0.55
+                frags.append(
+                    f'<text x="0" y="0" font-size="{base:.0f}" text-anchor="middle"'
+                    f' fill="{NET_PAD_MARKER_COLOR}" font-family="sans-serif"'
+                    f' font-weight="bold" data-net-pad-label="{attr}"'
+                    f' transform="translate({cx:.4f} {ly:.4f}) scale({sx:.6f} {s:.6f})"'
+                    f'>{html.escape(p.pin_name)}</text>'
+                )
+        return _insert_before_svg_close(svg, "".join(frags))
+
+    _MARKER_STROKE_WIDTH = 0.15
+    _MARKER_EXPAND = 1.10  # outline drawn 10% larger than the pad
+
+    def _pad_marker_fragment(
+        self, refdes: str, pad: str, cx: float, cy: float, w: float, h: float, attr: str
+    ) -> str:
+        """An outline of the pad's own shape, expanded 10% about its centre.
+
+        Falls back to an expanded rectangle when the pad element is unavailable.
+        """
+        scale = self._MARKER_EXPAND
+        elem = self._pad_shape_elem.get((refdes, pad))
+        if elem is not None:
+            clone = copy.deepcopy(elem)
+            for a in ("id", "data-element-key", "opacity", "display", "class", "style"):
+                clone.attrib.pop(a, None)
+            clone.set("fill", "none")
+            clone.set("stroke", NET_PAD_MARKER_COLOR)
+            clone.set("stroke-width", f"{self._MARKER_STROKE_WIDTH}")
+            clone.set("data-net-pad", attr)
+            existing = clone.get("transform", "")
+            expand = (
+                f"translate({cx:.4f} {cy:.4f}) scale({scale}) "
+                f"translate({-cx:.4f} {-cy:.4f})"
+            )
+            clone.set("transform", f"{expand} {existing}".strip())
+            try:
+                return ET.tostring(clone, encoding="unicode", xml_declaration=False)
+            except (TypeError, ValueError):
+                pass
+        ew, eh = w * scale, h * scale
+        return (
+            f'<rect x="{cx - ew / 2:.4f}" y="{cy - eh / 2:.4f}"'
+            f' width="{ew:.4f}" height="{eh:.4f}" rx="{min(ew, eh) * 0.15:.4f}"'
+            f' fill="none" stroke="{NET_PAD_MARKER_COLOR}"'
+            f' stroke-width="{self._MARKER_STROKE_WIDTH}" data-net-pad="{attr}" />'
+        )
+
+    def add_pin_net_labels(
+        self,
+        svg: str,
+        pins: list[PinInfo],
+        mirrored: bool = False,
+    ) -> str:
+        """Label each pad with its net name, centred on the pad (Altium-style)."""
+        base = self._LABEL_FONT_PX
+        frags: list[str] = []
+        for p in pins:
+            if p.bounds is None or not p.net:
+                continue
+            x0, y0, x1, y1 = p.bounds
+            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+            w, h = x1 - x0, y1 - y0
+            label = p.net
+            # Fit to the shorter pad dimension, shrink for long names, floor so
+            # it stays legible when zoomed in.
+            size = min(min(w, h) * 0.55, (w * 1.7) / max(len(label), 1))
+            size = max(size, 0.38)
+            s = size / base
+            sx = -s if mirrored else s
+            frags.append(
+                f'<text x="0" y="{base * 0.35:.4f}" font-size="{base:.0f}"'
+                f' text-anchor="middle" fill="#ffffff" font-family="sans-serif"'
+                f' data-pin-net="{html.escape(p.pin_name, quote=True)}"'
+                f' transform="translate({cx:.4f} {cy:.4f}) scale({sx:.6f} {s:.6f})"'
+                f'>{html.escape(label)}</text>'
+            )
+        return _insert_before_svg_close(svg, "".join(frags))
+
     def add_locate_marker(self, svg: str, refdes: str) -> str:
         """Overlay a bright crosshair ring around a single component to pinpoint it."""
         boxes = self._instance_bounds.get(refdes)
@@ -703,24 +891,49 @@ def _strip_non_assembly_elements(root: ET.Element) -> None:
     """
     Single-pass SVG cleanup (in place):
     - Via drill holes (data-hole-owner="via")
-    - Copper tracks, fills, and via rings (data-net-index present, no data-component)
+    - Inner-layer copper and via rings (data-net-index present, no data-component)
     - Mechanical footprint elements such as courtyard (data-layer-role="mechanical" with data-component)
     - Silkscreen elements are tagged with class="silkscreen-element" (hidden by default)
+    - Outer-layer copper (TOP/BOTTOM tracks and via rings) is tagged
+      class="copper-element" with data-copper-side and hidden by default, so the
+      board-reader can reveal it per side for a connectivity view.
     """
     for parent in list(root.iter()):
         to_remove = []
         for child in parent:
             net_index = child.get("data-net-index")
             component = child.get("data-component")
-            if child.get("data-layer-role") == "silkscreen":
+            role = child.get("data-layer-role")
+            layer = (child.get("data-layer-name") or "").upper()
+            is_copper_net = net_index is not None and component is None
+            is_region = child.get("data-primitive") == "shapebased-region"
+            is_outer_copper = (
+                role == "copper"
+                and layer in ("TOP", "BOTTOM")
+                and child.get("data-hole-owner") != "via"
+            )
+            if role == "silkscreen":
                 cls = child.get("class", "")
                 if "silkscreen-element" not in cls:
                     child.set("class", f"silkscreen-element {cls}".strip())
                     child.set("display", "none")
+            elif is_outer_copper and (is_copper_net or is_region):
+                # Outer-layer tracks, via rings, and poured regions: keep but hide,
+                # tagged so the board-reader can reveal them per side.
+                cls = child.get("class", "")
+                if "copper-element" not in cls:
+                    child.set("class", f"copper-element {cls}".strip())
+                    child.set("display", "none")
+                    child.set("data-copper-side", layer)
+            elif is_region and role == "copper" and layer not in ("TOP", "BOTTOM"):
+                # Inner-layer plane fills (MID*) carry no net index, so they dodge
+                # the net-based removal below. They are black and would occlude the
+                # outer copper once it is revealed — drop them (never shown).
+                to_remove.append(child)
             elif (
                 child.get("data-hole-owner") == "via"
                 or (net_index is not None and component is None)
-                or (child.get("data-layer-role") == "mechanical" and component is not None)
+                or (role == "mechanical" and component is not None)
                 or child.get("data-primitive") == "text"
             ):
                 to_remove.append(child)
@@ -779,6 +992,9 @@ def _add_pin1_markers(root: ET.Element) -> None:
         stop.set("stop-color", color)
 
     for elem in pin1_elems:
+        # Remember the pad's original fill so the stripe can be dropped in board
+        # reader mode (where every pad should read as one uniform colour).
+        elem.set("data-pin1-orig-fill", elem.get("fill") or "none")
         elem.set("fill", "url(#pin1-stripe)")
 
 
