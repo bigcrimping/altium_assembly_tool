@@ -28,6 +28,12 @@ a = Analysis(
         'flask',
         'jinja2',
         'jinja2.ext',
+        # MCP server (--mcp) and its ASGI stack are imported lazily
+        'mcp',
+        'mcp.server.mcpserver',
+        'uvicorn',
+        'starlette',
+        'sse_starlette',
     ],
     hookspath=['hooks'],  # picks up hooks/hook-altium_monkey.py
     hooksconfig={},

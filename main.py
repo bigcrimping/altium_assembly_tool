@@ -315,6 +315,13 @@ class MainWindow(QMainWindow):
         self._locate_ref: str | None = None  # a single part pinpointed via Find
         self._mode: str = "assembly"          # "assembly" | "reader"
         self._selected_net: str | None = None  # the net highlighted in board-reader
+        # Probe focus (driven by the MCP server): when non-empty, the reader view
+        # spotlights ONLY these pins — labelled, outlined, and zoomed-to-fit —
+        # overriding the single-net selection until cleared.
+        self._probe_pins: list = []
+        # Full net-label spec set, cached at load so the probe view can swap to a
+        # subset and restore the whole set on clear without rebuilding it.
+        self._full_label_specs: list = []
         self._net_rows: list[str] = []          # net name per reader-table row
         # True right after currentCellChanged already (de)selected a net, so the
         # following cellClicked on the same click does not immediately toggle it.
@@ -446,6 +453,13 @@ class MainWindow(QMainWindow):
         self._btn_reader.setCheckable(True)
         self._btn_reader.setStyleSheet(_SIDE_BTN_STYLE)
         self._btn_reader.setToolTip("Board reader: explore nets and probe points")
+        # Reserve width for the BOLD checked text so neither label clips when
+        # selected (the size hint is computed for the normal weight).
+        from PySide6.QtGui import QFontMetrics
+        for _b in (self._btn_assembly, self._btn_reader):
+            _bold = _b.font()
+            _bold.setBold(True)
+            _b.setMinimumWidth(QFontMetrics(_bold).horizontalAdvance(_b.text()) + 28)
         self._mode_group = QButtonGroup(self)
         self._mode_group.addButton(self._btn_assembly)
         self._mode_group.addButton(self._btn_reader)
@@ -635,6 +649,10 @@ class MainWindow(QMainWindow):
         self._btn_clear_nets = QPushButton("Clear Nets")
         self._btn_clear_nets.setToolTip("Deselect the highlighted net")
         reader_header.addWidget(self._btn_clear_nets)
+        self._btn_clear_probes = QPushButton("Clear Probes")
+        self._btn_clear_probes.setToolTip("Clear the probe points shown by Claude")
+        self._btn_clear_probes.setEnabled(False)
+        reader_header.addWidget(self._btn_clear_probes)
         reader_header.addStretch(1)
         reader_layout.addLayout(reader_header)
 
@@ -697,6 +715,7 @@ class MainWindow(QMainWindow):
         )
         self._net_table.cellClicked.connect(self._on_net_cell_clicked)
         self._btn_clear_nets.clicked.connect(self._clear_net_selection)
+        self._btn_clear_probes.clicked.connect(self.clear_probe_points)
         self._net_filter_box.textChanged.connect(self._filter_net_list)
         self._btn_hide_fitted.toggled.connect(self._apply_row_filters)
         self._search_box.textChanged.connect(self._apply_row_filters)
@@ -842,10 +861,13 @@ class MainWindow(QMainWindow):
         # Auto-load companion files sitting next to the board
         auto_notes = self._load_companion_files(model)
 
+        self._probe_pins = []
+        self._btn_clear_probes.setEnabled(False)
         self._rebuild_active_bom()
         self._viewer.set_flip(False)
         self._update_viewer()
-        self._viewer.set_pin_labels(self._build_pin_label_specs())
+        self._full_label_specs = self._build_pin_label_specs()
+        self._viewer.set_pin_labels(self._full_label_specs)
         self._sync_net_labels()
         QTimer.singleShot(0, self._viewer.fit_to_view)
         self._btn_fit.setEnabled(True)
@@ -1466,6 +1488,8 @@ class MainWindow(QMainWindow):
             self._bottom_stack.setCurrentIndex(1)
         else:
             self._selected_net = None
+            self._probe_pins = []
+            self._btn_clear_probes.setEnabled(False)
             self._net_table.blockSignals(True)
             self._net_table.clearSelection()
             self._net_table.blockSignals(False)
@@ -1526,7 +1550,9 @@ class MainWindow(QMainWindow):
             self._select_net(net, from_table=True)
 
     def _clear_net_selection(self) -> None:
-        """Deselect the highlighted net and return to the plain board view."""
+        """Deselect the highlighted net (and any probe focus) and return to the
+        plain reader view. Both Clear buttons route here so either one fully
+        resets, including the MCP-driven probe spotlight."""
         if self._model is None:
             return
         self._selected_net = None
@@ -1535,11 +1561,118 @@ class MainWindow(QMainWindow):
         self._net_table.clearSelection()
         self._net_table.setCurrentCell(-1, -1)
         self._net_table.blockSignals(False)
+        had_probe = bool(self._probe_pins)
+        if had_probe:
+            self._probe_pins = []
+            self._btn_clear_probes.setEnabled(False)
+            self._viewer.set_pin_labels(self._full_label_specs)
         self._update_viewer()
+        self._sync_net_labels()
+        # Reset the view to the whole board so the clear is unmistakable.
+        QTimer.singleShot(0, self._viewer.fit_to_view)
+
+    # ------------------------------------------------------------------
+    # Probe focus — driven by the MCP server (and the Clear Probes button)
+    # ------------------------------------------------------------------
+
+    def model(self) -> PcbModel | None:
+        """The loaded board model, or None. Read-only; safe off the GUI thread."""
+        return self._model
+
+    def resolve_probe_pins(self, nets: list, pins: list) -> tuple[list, list]:
+        """Resolve net names and 'REFDES-PAD' tokens to a de-duplicated pin list,
+        filtered to the current view side. Returns (pins, unresolved_tokens).
+
+        Pure/read-only — the MCP server calls this to build its response.
+        """
+        if self._model is None:
+            return [], list(nets) + list(pins)
+        hide = self._model.hidden_designators_for_side(self._view_side)
+        resolved: list = []
+        seen: set[tuple[str, str]] = set()
+        unresolved: list[str] = []
+
+        def _add(p) -> None:
+            key = (p.refdes, p.pad)
+            if key not in seen and p.refdes not in hide:
+                seen.add(key)
+                resolved.append(p)
+
+        for net in nets or []:
+            net_pins = self._model.net_pins(net)
+            if not net_pins:
+                unresolved.append(net)
+            for p in net_pins:
+                _add(p)
+
+        for token in pins or []:
+            refdes, _, pad = str(token).partition("-")
+            match = next(
+                (p for p in self._model.pins_for_refdes(refdes) if p.pad == pad),
+                None,
+            )
+            if match is None:
+                unresolved.append(token)
+            else:
+                _add(match)
+
+        return resolved, unresolved
+
+    def show_probe_points(self, nets: list, pins: list) -> None:
+        """Spotlight a set of probe points in the live Board Reader view.
+
+        Switches to reader mode, hides all other net labels, labels+outlines only
+        the resolved pins, and zooms to fit them. Invoked on the GUI thread via a
+        queued signal from the MCP server, so it is Qt-thread-safe.
+        """
+        if self._model is None:
+            return
+        if self._mode != "reader":
+            self._btn_reader.setChecked(True)
+            self._on_mode_changed("reader")
+        # Probe focus is the sole highlight — drop any single-net selection.
+        self._selected_net = None
+        self._net_table.blockSignals(True)
+        self._net_table.clearSelection()
+        self._net_table.setCurrentCell(-1, -1)
+        self._net_table.blockSignals(False)
+        self._locate_ref = None
+
+        resolved, _ = self.resolve_probe_pins(nets, pins)
+        self._probe_pins = resolved
+        self._btn_clear_probes.setEnabled(bool(resolved))
+        self._viewer.set_pin_labels(self._label_specs_for_pins(resolved))
+        self._sync_net_labels()
+        self._update_viewer()
+        if resolved:
+            # Defer the zoom so it runs AFTER any fit-to-view queued by a mode
+            # switch above (both are singleShot(0); FIFO keeps ours last).
+            QTimer.singleShot(0, lambda: self._zoom_to_pins(resolved))
+            self.statusBar().showMessage(
+                f"Probe points: {len(resolved)} pin(s) — "
+                + ", ".join(p.pin_name for p in resolved[:12])
+                + ("…" if len(resolved) > 12 else ""),
+                10000,
+            )
+
+    def clear_probe_points(self) -> None:
+        """Remove the probe spotlight, restore the normal reader view, and zoom
+        back out to the whole board."""
+        if not self._probe_pins:
+            return
+        self._probe_pins = []
+        self._btn_clear_probes.setEnabled(False)
+        self._viewer.set_pin_labels(self._full_label_specs)
+        self._update_viewer()
+        self._sync_net_labels()
+        QTimer.singleShot(0, self._viewer.fit_to_view)
 
     def _select_net(self, name: str, *, from_table: bool = False) -> None:
         if self._model is None:
             return
+        if self._probe_pins:
+            # A manual net selection supersedes the probe spotlight.
+            self.clear_probe_points()
         self._selected_net = name
         self._locate_ref = None
         if not from_table:
@@ -1579,7 +1712,18 @@ class MainWindow(QMainWindow):
         net = self._selected_net
         locate = self._locate_ref if net is None else None
 
-        if net:
+        if self._probe_pins:
+            # Probe focus takes precedence: spotlight only the probe pads with
+            # outlines (no pin-name text). Net names are shown by the zoom-aware
+            # Qt labels, which follow the Net Names toggle.
+            touched = {p.refdes for p in self._probe_pins}
+            svg = self._model.svg_for_designators(
+                touched, hide or None, show_silkscreen=show_silk, copper_side=copper_side,
+            )
+            svg = self._model.add_net_pad_markers(
+                svg, self._probe_pins, label=False, mirrored=mirrored,
+            )
+        elif net:
             pins = self._reader_visible_pins(net)
             touched = {p.refdes for p in pins}
             svg = self._model.svg_for_designators(
@@ -1607,36 +1751,54 @@ class MainWindow(QMainWindow):
             svg = self._model.add_locate_marker(svg, locate)
         self._viewer.load_svg(svg)
 
-    def _build_pin_label_specs(self) -> list[tuple[str, float, float, float, float, str]]:
-        """Net-name label specs in SVG-item coords: (net, x, y, w, h, side)."""
+    def _label_specs_for_pins(self, pins: list) -> list[tuple[str, float, float, float, float, str]]:
+        """Net-name label specs in SVG-item coords for the given pins:
+        (net, x, y, w, h, side)."""
         if self._model is None:
             return []
         vx, vy = self._model.viewbox_origin
         specs: list[tuple[str, float, float, float, float, str]] = []
-        for refdes in self._model.all_designators:
-            for p in self._model.pins_for_refdes(refdes):
-                if not p.net or p.bounds is None:
-                    continue
-                x0, y0, x1, y1 = p.bounds
-                specs.append((
-                    p.net,
-                    (x0 + x1) / 2 - vx,
-                    (y0 + y1) / 2 - vy,
-                    x1 - x0,
-                    y1 - y0,
-                    p.side,
-                ))
+        for p in pins:
+            if not p.net or p.bounds is None:
+                continue
+            x0, y0, x1, y1 = p.bounds
+            specs.append((
+                p.net,
+                (x0 + x1) / 2 - vx,
+                (y0 + y1) / 2 - vy,
+                x1 - x0,
+                y1 - y0,
+                p.side,
+            ))
         return specs
 
+    def _build_pin_label_specs(self) -> list[tuple[str, float, float, float, float, str]]:
+        """Net-name label specs for every connected pad on the board."""
+        if self._model is None:
+            return []
+        pins = [p for refdes in self._model.all_designators
+                for p in self._model.pins_for_refdes(refdes)]
+        return self._label_specs_for_pins(pins)
+
     def _sync_net_labels(self) -> None:
-        """Enable the viewer's zoom-aware net labels only in reader mode."""
+        """Enable the viewer's zoom-aware net labels in reader mode (and in probe
+        focus), following the Net Names toggle."""
         on = self._mode == "reader" and self._btn_net_names.isChecked()
         self._viewer.set_pin_labels_enabled(on)
 
+    # Smallest board area (mm per side) a zoom-to-fit will frame, so a single tiny
+    # pad still shows surrounding context instead of filling the whole view.
+    _MIN_ZOOM_EXTENT_MM = 20.0
+
     def _zoom_to_net(self, name: str) -> None:
+        self._zoom_to_pins(self._reader_visible_pins(name))
+
+    def _zoom_to_pins(self, pins: list) -> None:
+        """Fit the view to the given pins' union bbox, with a context margin and a
+        minimum framed extent so a lone pad is still findable."""
         if self._model is None:
             return
-        boxes = [p.bounds for p in self._reader_visible_pins(name) if p.bounds is not None]
+        boxes = [p.bounds for p in pins if p.bounds is not None]
         if not boxes:
             return
         x0 = min(b[0] for b in boxes)
@@ -1645,10 +1807,17 @@ class MainWindow(QMainWindow):
         y1 = max(b[3] for b in boxes)
         vx, vy = self._model.viewbox_origin
         pad = max(x1 - x0, y1 - y0) * 0.2 + 2.0
-        self._viewer.zoom_to_item_rect(QRectF(
-            x0 - vx - pad, y0 - vy - pad,
-            (x1 - x0) + 2 * pad, (y1 - y0) + 2 * pad,
-        ))
+        rx, ry = x0 - vx - pad, y0 - vy - pad
+        rw, rh = (x1 - x0) + 2 * pad, (y1 - y0) + 2 * pad
+        # Clamp to a minimum extent, growing the rect about its centre.
+        for lo, size, i in ((rx, rw, 0), (ry, rh, 1)):
+            if size < self._MIN_ZOOM_EXTENT_MM:
+                grow = (self._MIN_ZOOM_EXTENT_MM - size) / 2
+                if i == 0:
+                    rx, rw = lo - grow, self._MIN_ZOOM_EXTENT_MM
+                else:
+                    ry, rh = lo - grow, self._MIN_ZOOM_EXTENT_MM
+        self._viewer.zoom_to_item_rect(QRectF(rx, ry, rw, rh))
 
     def _on_reader_click(self, item_x: float, item_y: float) -> None:
         """Board click in reader mode: resolve the pad under the cursor to its net."""
@@ -1879,6 +2048,10 @@ def main() -> None:
     parser.add_argument("file", nargs="?", help="PCB file to open (.PcbDoc)")
     parser.add_argument("--browser", action="store_true", help="Launch browser-based UI")
     parser.add_argument("--port", type=int, default=4321, help="Port for browser UI (default: 4321)")
+    parser.add_argument("--mcp", action="store_true",
+                        help="Expose an MCP server so Claude can drive the viewer")
+    parser.add_argument("--mcp-port", type=int, default=4323,
+                        help="Port for the MCP server (default: 4323)")
     args = parser.parse_args()
 
     pcb_path = Path(args.file) if args.file else None
@@ -1895,6 +2068,10 @@ def main() -> None:
     if pcb_path is not None:
         from PySide6.QtCore import QTimer
         QTimer.singleShot(100, lambda: window._load_file(pcb_path))
+    if args.mcp:
+        from mcp_server import start_mcp_server
+        start_mcp_server(window, port=args.mcp_port)
+        print(f"MCP server at http://127.0.0.1:{args.mcp_port}/mcp")
     sys.exit(app.exec())
 
 
