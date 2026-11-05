@@ -22,6 +22,7 @@ ET.register_namespace("", SVG_NS)
 SELECT_HIGHLIGHT_COLOR = "#56B4E9"  # sky blue — the selected BOM row's components
 PLACED_MARKER_COLOR    = "#009E73"  # bluish green — placed
 DNP_MARKER_COLOR       = "#D55E00"  # vermillion — DNP / no-fit
+LOCATE_MARKER_COLOR    = "#CC79A7"  # reddish purple — the refdes located by search
 
 # ComponentKind values to exclude from assembly BOM
 _BOM_EXCLUDE_KIND_VALUES = frozenset({1, 2, 4, 5})
@@ -50,6 +51,27 @@ class BomEntry:
     bot_refs: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class PinInfo:
+    """A single connected pad on the board.
+
+    pin_name is the pad designator as a reference reads it (e.g. "IC6-8").
+    side is the copper side the pad is probeable from: "TOP", "BOTTOM", or
+    "BOTH" for a through-hole pad that appears on both outer layers. bounds is
+    the pad's bbox in the same SVG coordinate space as component_bounds, or None
+    when the pad has no renderable copper geometry.
+    """
+    refdes: str
+    pad: str
+    net: str
+    side: str
+    bounds: tuple[float, float, float, float] | None = None
+
+    @property
+    def pin_name(self) -> str:
+        return f"{self.refdes}-{self.pad}"
+
+
 class PcbModel:
     """
     Loads an Altium .PcbDoc or .PrjPcb file and provides BOM data + SVG rendering.
@@ -73,6 +95,13 @@ class PcbModel:
         # designator → per-instance bboxes (one per data-component-uid)
         self._instance_bounds: dict[str, list[tuple[float, float, float, float]]] = {}
         self._hidden_by_side: dict[str, frozenset[str]] = {}
+        # designator → mounting side ("TOP"/"BOTTOM"), from the BOM pass.
+        self._comp_side: dict[str, str] = {}
+        # Net/pin connectivity layer (built from the rendered SVG).
+        self._net_pins: dict[str, list[PinInfo]] = {}          # net name → pins
+        self._pins_by_refdes: dict[str, list[PinInfo]] = {}    # refdes → pins
+        self._pin_bounds: dict[tuple[str, str], tuple[float, float, float, float]] = {}
+        self._net_name_lookup: dict[str, str] = {}             # lower(name) → name
 
     # ------------------------------------------------------------------
     # Public API
@@ -407,6 +436,10 @@ class PcbModel:
 
         bom.sort(key=lambda e: _natural_key(e.designators[0]))
         self._bom = bom
+        self._comp_side = {
+            d: ("BOTTOM" if "BOTTOM" in layer else "TOP")
+            for d, layer in comp_layers.items()
+        }
 
     def _render_base_svg(self, report=None) -> None:
         def _report(pct: int, msg: str) -> None:
@@ -445,6 +478,7 @@ class PcbModel:
 
         self._comp_elems = _index_component_elements(root)
         self._component_svg_bounds, self._instance_bounds = _compute_bounds(self._comp_elems)
+        self._build_netlist(root)
         self._root = root
         self._base_svg = ET.tostring(root, encoding="unicode", xml_declaration=False)
 
@@ -493,6 +527,154 @@ class PcbModel:
 
         for (dx, dy), affected in delta_to_designators.items():
             _translate_displaced_components(root, affected, dx, dy)
+
+    # ------------------------------------------------------------------
+    # Net / pin connectivity layer
+    # ------------------------------------------------------------------
+
+    def _build_netlist(self, root: ET.Element) -> None:
+        """Index every connected copper pad by net and by refdes (in place).
+
+        Built from the rendered SVG so pad geometry lands in the same coordinate
+        space as component_bounds. A pad is split across copper/paste/soldermask
+        elements and, for through-hole, across outer layers; they are unioned per
+        (refdes, pad) and the set of copper side layers decides TOP/BOTTOM/BOTH.
+        """
+        # (refdes, pad) → {"net": str, "sides": set, "boxes": [bbox, ...]}
+        acc: dict[tuple[str, str], dict] = {}
+        for elem in root.iter():
+            pad = elem.get("data-pad-designator")
+            refdes = elem.get("data-component")
+            if pad is None or refdes is None:
+                continue
+            if elem.get("data-layer-role") != "copper":
+                continue  # ignore paste/soldermask apertures; copper is what we probe
+            net = (elem.get("data-net") or "").strip()
+            layer_name = (elem.get("data-layer-name") or "").upper()
+            rec = acc.setdefault((refdes, pad), {"net": net, "sides": set(), "boxes": []})
+            if net and not rec["net"]:
+                rec["net"] = net
+            if layer_name.startswith("TOP"):
+                rec["sides"].add("TOP")
+            elif layer_name.startswith("BOTTOM"):
+                rec["sides"].add("BOTTOM")
+            box = _element_bounds(elem)
+            if box is not None:
+                rec["boxes"].append(box)
+
+        net_pins: dict[str, list[PinInfo]] = {}
+        pins_by_refdes: dict[str, list[PinInfo]] = {}
+        pin_bounds: dict[tuple[str, str], tuple[float, float, float, float]] = {}
+
+        for (refdes, pad), rec in acc.items():
+            boxes = rec["boxes"]
+            bounds = None
+            if boxes:
+                bounds = (
+                    min(b[0] for b in boxes),
+                    min(b[1] for b in boxes),
+                    max(b[2] for b in boxes),
+                    max(b[3] for b in boxes),
+                )
+                pin_bounds[(refdes, pad)] = bounds
+            sides = rec["sides"]
+            if sides == {"TOP"}:
+                side = "TOP"
+            elif sides == {"BOTTOM"}:
+                side = "BOTTOM"
+            elif sides:
+                side = "BOTH"
+            else:
+                side = self._comp_side.get(refdes, "TOP")
+            pin = PinInfo(refdes=refdes, pad=pad, net=rec["net"], side=side, bounds=bounds)
+            pins_by_refdes.setdefault(refdes, []).append(pin)
+            if pin.net:
+                net_pins.setdefault(pin.net, []).append(pin)
+
+        for pins in pins_by_refdes.values():
+            pins.sort(key=lambda p: _natural_key(p.pad))
+        for pins in net_pins.values():
+            pins.sort(key=lambda p: (_natural_key(p.refdes), _natural_key(p.pad)))
+
+        self._net_pins = net_pins
+        self._pins_by_refdes = pins_by_refdes
+        self._pin_bounds = pin_bounds
+        self._net_name_lookup = {name.lower(): name for name in net_pins}
+
+    # ------------------------------------------------------------------
+    # Net / pin public API
+    # ------------------------------------------------------------------
+
+    @property
+    def all_designators(self) -> frozenset[str]:
+        """Every component designator present on the board."""
+        return frozenset(self._comp_elems.keys())
+
+    def designator_side(self, refdes: str) -> str | None:
+        """Mounting side of a component ("TOP"/"BOTTOM"), or None if unknown."""
+        return self._comp_side.get(refdes)
+
+    @property
+    def net_names(self) -> list[str]:
+        """All net names that have at least one connected pad, naturally sorted."""
+        return sorted(self._net_pins.keys(), key=_natural_key)
+
+    def net_pins(self, net_name: str) -> list[PinInfo]:
+        """Pins on a net. Case-insensitive; returns [] when the net is unknown."""
+        resolved = self._net_name_lookup.get(net_name.lower())
+        return list(self._net_pins.get(resolved, ())) if resolved else []
+
+    def pins_for_refdes(self, refdes: str) -> list[PinInfo]:
+        """Every connected pad of a component, naturally sorted by pad."""
+        return list(self._pins_by_refdes.get(refdes, ()))
+
+    def find_nets(self, query: str) -> list[str]:
+        """Net names containing query (case-insensitive), exact matches first."""
+        q = query.strip().lower()
+        if not q:
+            return []
+        exact = [n for n in self._net_pins if n.lower() == q]
+        partial = [n for n in self._net_pins if q in n.lower() and n.lower() != q]
+        return exact + sorted(partial, key=_natural_key)
+
+    def pin_bounds(self, refdes: str, pad: str) -> tuple[float, float, float, float] | None:
+        """Bbox of one pad in component_bounds' coordinate space, or None."""
+        return self._pin_bounds.get((refdes, pad))
+
+    def net_bounds(self, net_name: str) -> tuple[float, float, float, float] | None:
+        """Union bbox of every pad on a net, or None when nothing is renderable."""
+        boxes = [p.bounds for p in self.net_pins(net_name) if p.bounds is not None]
+        if not boxes:
+            return None
+        return (
+            min(b[0] for b in boxes),
+            min(b[1] for b in boxes),
+            max(b[2] for b in boxes),
+            max(b[3] for b in boxes),
+        )
+
+    def add_locate_marker(self, svg: str, refdes: str) -> str:
+        """Overlay a bright crosshair ring around a single component to pinpoint it."""
+        boxes = self._instance_bounds.get(refdes)
+        if not boxes:
+            return svg
+        frags = []
+        for x0, y0, x1, y1 in boxes:
+            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+            w, h = x1 - x0, y1 - y0
+            r = max(w, h) * 0.5 + 0.6
+            reach = r + max(w, h) * 0.45 + 0.6
+            frags.append(
+                f'<g data-locate-marker="{html.escape(refdes, quote=True)}"'
+                f' fill="none" stroke="{LOCATE_MARKER_COLOR}" stroke-width="0.18">'
+                f'<circle cx="{cx:.4f}" cy="{cy:.4f}" r="{r:.4f}" />'
+                f'<line x1="{cx:.4f}" y1="{cy - reach:.4f}" x2="{cx:.4f}" y2="{cy - r:.4f}" />'
+                f'<line x1="{cx:.4f}" y1="{cy + r:.4f}" x2="{cx:.4f}" y2="{cy + reach:.4f}" />'
+                f'<line x1="{cx - reach:.4f}" y1="{cy:.4f}" x2="{cx - r:.4f}" y2="{cy:.4f}" />'
+                f'<line x1="{cx + r:.4f}" y1="{cy:.4f}" x2="{cx + reach:.4f}" y2="{cy:.4f}" />'
+                f'</g>'
+            )
+        return _insert_before_svg_close(svg, "".join(frags))
 
 
 # ------------------------------------------------------------------
